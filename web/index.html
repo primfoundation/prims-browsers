@@ -1,15 +1,20 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-palette="ink">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Prims Browsers</title>
+  <link rel="icon" href="/brand/assets/logos/folio-gold.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/brand/kit.css">
   <link rel="stylesheet" href="/desk.css">
 </head>
 <body>
   <aside class="rail" aria-label="Tenants">
-    <p class="kicker">Prims Browsers</p>
-    <p class="sub">Glass sits in the desk. Close the view; the jar keeps running.</p>
+    <div class="mark">
+      <img src="/brand/assets/logos/folio-gold.svg" width="28" height="28" alt="">
+      <p class="kicker">Prims Browsers</p>
+    </div>
+    <p class="sub">The glass is a view. Close it; the jar stays.</p>
     <ul id="rail"></ul>
     <p class="foot" id="source"></p>
   </aside>
@@ -24,7 +29,7 @@
         <button type="button" id="close" hidden>Close this view</button>
       </div>
     </header>
-    <div id="empty" class="empty">Five desks. Click Greenmark to embed the glass here.</div>
+    <div id="empty" class="empty">Five desks. Click Greenmark to put the glass here.</div>
     <iframe id="glass" title="Tenant Chromium"></iframe>
   </main>
   <script src="/desk.js"></script>

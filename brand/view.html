@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" data-palette="ink">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prims · brand kit</title>
+<link rel="stylesheet" href="kit.css">
+<link rel="stylesheet" href="blocks/lede/block.css">
+<link rel="stylesheet" href="blocks/page-hero/block.css">
+<style>
+  .bar { display:flex; justify-content:space-between; align-items:center; padding:0.75rem 1.25rem; border-bottom:1px solid var(--line); font-size:0.8rem; font-family:var(--mono); color:var(--ink-soft); }
+  .bar button { background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:var(--radius); padding:0.3rem 0.6rem; font: inherit; cursor:pointer; }
+  .bar button[aria-pressed="true"] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  main { max-width: 52rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; display:grid; gap:2.5rem; }
+  .chips { display:flex; gap:0.5rem; flex-wrap:wrap; }
+  .chip { width:4.5rem; height:4.5rem; border-radius:var(--radius); border:1px solid var(--line); display:flex; align-items:flex-end; padding:0.35rem; font-family:var(--mono); font-size:0.65rem; }
+  .marks { display:flex; gap:1.5rem; align-items:center; }
+  .marks figure { margin:0; text-align:center; font-family:var(--mono); font-size:0.7rem; color:var(--ink-soft); }
+  .marks img { width:72px; height:72px; }
+  .on-ink { background:var(--bg); padding:1rem; border-radius:var(--radius); }
+  html[data-palette="paper"] .on-ink, html[data-palette="system"] .on-ink { background:#0c0c0e; }
+  .on-paper { background:#f4f3ef; padding:1rem; border-radius:var(--radius); }
+  h2 { font-size:0.8rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--ink-soft); font-weight:500; margin:0 0 0.75rem; font-family:var(--mono); }
+  .tag { color:var(--ink-soft); font-family:var(--mono); font-size:0.85rem; margin:0.75rem 0 0; }
+</style>
+<div class="bar">
+  <span>packs/prim · projection of identity.json</span>
+  <span>
+    <button type="button" data-p="paper">Paper</button>
+    <button type="button" data-p="ink" aria-pressed="true">Ink</button>
+    <button type="button" data-p="system">System</button>
+  </span>
+</div>
+<main>
+  <section>
+    <header class="page-hero">
+      <img src="assets/logos/folio-gold.svg" alt="" width="48" height="48">
+      <h1>Prims<span class="stop">.</span></h1>
+    </header>
+    <p class="lede" style="margin-top:1rem">A file that stores information, and tools that interact with it.</p>
+    <p class="tag">The source of truth. Everything else is a view.</p>
+  </section>
+  <section>
+    <h2>Mark</h2>
+    <div class="marks">
+      <figure class="on-ink"><img src="assets/logos/folio-gold.svg" alt="folio gold"><figcaption>gold on ink</figcaption></figure>
+      <figure class="on-paper"><img src="assets/logos/folio-ink.svg" alt="folio ink"><figcaption>ink on paper</figcaption></figure>
+      <figure class="on-ink"><img src="assets/logos/folio-cream.svg" alt="folio cream"><figcaption>cream on ink</figcaption></figure>
+    </div>
+  </section>
+  <section>
+    <h2>Color</h2>
+    <div class="chips">
+      <div class="chip" style="background:var(--bg)">bg</div>
+      <div class="chip" style="background:var(--surface)">surface</div>
+      <div class="chip" style="background:var(--raised)">raised</div>
+      <div class="chip" style="background:var(--accent);color:var(--accent-ink)">accent</div>
+      <div class="chip" style="background:var(--line)">line</div>
+      <div class="chip" style="background:var(--ink-soft);color:var(--bg)">muted</div>
+    </div>
+  </section>
+  <section>
+    <h2>Type</h2>
+    <p style="font-size:2.44rem;font-weight:650;margin:0;letter-spacing:-0.02em">Instrument Sans</p>
+    <p style="margin:0.3rem 0 0">Body 400. Precise, calm. No hype.</p>
+    <p style="font-family:var(--mono);font-size:0.9rem;color:var(--ink-soft);margin:0.75rem 0 0">IBM Plex Mono — send me the prim.</p>
+  </section>
+</main>
+<script>
+  const html = document.documentElement;
+  document.querySelectorAll(".bar button").forEach(b => {
+    b.addEventListener("click", () => {
+      html.setAttribute("data-palette", b.dataset.p);
+      document.querySelectorAll(".bar button").forEach(x => x.setAttribute("aria-pressed", x===b ? "true":"false"));
+    });
+  });
+</script>

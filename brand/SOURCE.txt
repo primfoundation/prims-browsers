@@ -1,0 +1,3 @@
+Source: eidos-agi/prim.brand packs/prim
+identity.json is authority.
+Do not invent hex in product CSS. Link kit.css. data-palette ink|paper|system.

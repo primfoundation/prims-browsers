@@ -1,0 +1,8 @@
+{
+  "id": "block:lede",
+  "name": "Lede",
+  "when": "Opening summary. One paragraph under the title. The first thing a stranger reads.",
+  "refuses": ["hero subcopy with three clauses of hype", "consumer-app cheerfulness", "Eidos house doctrine"],
+  "states": ["default"],
+  "implementation": { "html": "block.html", "css": "block.css" }
+}

@@ -1,0 +1,17 @@
+.page-hero {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.page-hero img, .page-hero svg {
+  width: 48px;
+  height: 48px;
+  color: var(--accent);
+}
+.page-hero h1 {
+  font-size: 2.44rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+.page-hero h1 .stop { color: var(--accent); }

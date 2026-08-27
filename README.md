@@ -18,3 +18,5 @@ prims-browsers screenshot gmw --out /tmp/gmw.png
 ```
 
 Tenant list is mocked in `tenants.json`. Later: `prims-desktop tenants --json`.
+
+Brand: `brand/` is the Prim kit from `prim.brand` (`packs/prim`). Desk links `kit.css` and sets `data-palette="ink"`. Do not copy tokens out of the pack.

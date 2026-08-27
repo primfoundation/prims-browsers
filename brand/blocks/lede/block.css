@@ -1,0 +1,7 @@
+.lede {
+  font-size: 1.25rem;
+  line-height: 1.45;
+  max-width: 38rem;
+  color: var(--ink);
+  margin: 0;
+}

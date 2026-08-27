@@ -1,0 +1,8 @@
+{
+  "id": "block:page-hero",
+  "name": "PageHero",
+  "when": "Page header. Exactly one h1. Period after the name. Mark optional, left of the title.",
+  "refuses": ["two H1s", "gradient mesh", "Eidos tridot"],
+  "states": ["default"],
+  "implementation": { "html": "block.html", "css": "block.css" }
+}

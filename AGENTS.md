@@ -9,3 +9,4 @@ Product: primfoundation/prims-browsers. Local: `~/repos-prim-foundation/prims-br
 - Do not copy a human Chrome/Comet cookie jar into these profiles.
 - Do not start five Chromiums for a mock. One live glass is enough (gmw).
 - Config belongs under this repo / `~/.prim/` — not `~/.eidos-browsing/`.
+- Visuals: `brand/` is `prim.brand` packs/prim. `identity.json` is law. Link `kit.css`. Do not invent hex. No Eidos tridot. No `#6c8aff`. Gold folio on ink.

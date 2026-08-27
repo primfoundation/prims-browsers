@@ -42,7 +42,7 @@ function setStage(row) {
     title.textContent = "Pick a tenant";
     meta.textContent = "";
     empty.classList.remove("off");
-    empty.textContent = "Five desks. Click Greenmark to embed the glass here.";
+    empty.textContent = "Five desks. The glass is a view. Click Greenmark.";
     glass.classList.remove("on");
     unbindGlass();
     watch.hidden = true;

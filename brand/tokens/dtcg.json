@@ -1,0 +1,34 @@
+{
+  "$schema": "https://tr.designtokens.org/format/",
+  "color": {
+    "paper": {
+      "bg": { "$type": "color", "$value": "#f4f3ef" },
+      "surface": { "$type": "color", "$value": "#e8e7e3" },
+      "raised": { "$type": "color", "$value": "#fafaf8" },
+      "ink": { "$type": "color", "$value": "#0c0c0e" },
+      "ink-soft": { "$type": "color", "$value": "#6a6a66" },
+      "subtle": { "$type": "color", "$value": "#9a9a96" },
+      "line": { "$type": "color", "$value": "#d4d3cf" },
+      "accent": { "$type": "color", "$value": "#e8c547" },
+      "accent-ink": { "$type": "color", "$value": "#0c0c0e" }
+    },
+    "ink": {
+      "bg": { "$type": "color", "$value": "#0c0c0e" },
+      "surface": { "$type": "color", "$value": "#111114" },
+      "raised": { "$type": "color", "$value": "#16161a" },
+      "ink": { "$type": "color", "$value": "#f4f3ef" },
+      "ink-soft": { "$type": "color", "$value": "#9a9a96" },
+      "subtle": { "$type": "color", "$value": "#6a6a66" },
+      "line": { "$type": "color", "$value": "#2a2a2e" },
+      "accent": { "$type": "color", "$value": "#e8c547" },
+      "accent-ink": { "$type": "color", "$value": "#0c0c0e" }
+    }
+  },
+  "font": {
+    "sans": { "$type": "fontFamily", "$value": ["Instrument Sans", "Segoe UI", "Helvetica Neue", "Arial", "sans-serif"] },
+    "mono": { "$type": "fontFamily", "$value": ["IBM Plex Mono", "ui-monospace", "SF Mono", "Menlo", "Consolas", "monospace"] }
+  },
+  "size": {
+    "radius": { "$type": "dimension", "$value": "2px" }
+  }
+}

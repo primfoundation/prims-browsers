@@ -1,0 +1,155 @@
+{
+  "brand_version": "0.1.0",
+  "status": "active",
+  "brand": {
+    "id": "brand:prim",
+    "display_name": "Prims",
+    "legal_name": "Prim",
+    "legal_note": "Prim is the product noun and category. Eidos AGI is the company; this pack is the Prim product surface, not the company house kit.",
+    "positioning": "A file that stores information, and tools that interact with it.",
+    "tagline": "The source of truth. Everything else is a view.",
+    "tagline_alt": "Send me the prim.",
+    "personality": [
+      "precise",
+      "calm",
+      "infrastructure-grade",
+      "slightly absolute without being loud"
+    ]
+  },
+  "logo": [
+    {
+      "id": "logo:folio",
+      "role": "primary",
+      "path": "assets/logos/folio.svg",
+      "sha256": "aa591407e2fae5a48efa7d9fbfd40ef0e7c731c8af08838ba8a1a0ef40ec23e8",
+      "fill": "currentColor",
+      "clear_space": "1x spine width",
+      "min_size_px": 24
+    },
+    {
+      "id": "logo:folio-gold",
+      "role": "on-ink",
+      "path": "assets/logos/folio-gold.svg",
+      "sha256": "7acfde45a97ec34a328611eaa5bbb2942d531d34f70ca296fa88a59d5812d966"
+    },
+    {
+      "id": "logo:folio-ink",
+      "role": "on-paper",
+      "path": "assets/logos/folio-ink.svg",
+      "sha256": "363561dac34d39249420862f076064d97659569f3c431ebdcd89328694dd5660"
+    },
+    {
+      "id": "logo:folio-cream",
+      "role": "reverse-on-ink",
+      "path": "assets/logos/folio-cream.svg",
+      "sha256": "a1be730909582dc66e821e25d68874c9974e426a7be5d84b3b89556cb8ac057d"
+    }
+  ],
+  "usage_rules": [
+    "Never stretch, skew, or add drop shadows, gradients, or outlines.",
+    "Never use the Eidos tridot for Prim.",
+    "Gold folio on ink. Ink folio on paper. Cream folio only as reverse on ink.",
+    "The mark is a bound file: spine plus page with a folded corner. Keep both parts.",
+    "Do not cheer. Do not hype. Prim is infrastructure."
+  ],
+  "typefaces": [
+    {
+      "id": "type:instrument-sans",
+      "family": "Instrument Sans",
+      "roles": [
+        "display",
+        "body",
+        "ui"
+      ],
+      "license": "SIL OFL 1.1",
+      "license_path": "assets/fonts/OFL.txt",
+      "files": [
+        {
+          "path": "assets/fonts/InstrumentSans-Variable.ttf",
+          "sha256": "b24f1812584816958afcf22e22d08e44318c5e51651e25d2438efdde389b33b1",
+          "note": "Vendored from google/fonts ofl/instrumentsans (InstrumentSans[wdth,wght].ttf), renamed for a stable @font-face URL."
+        }
+      ]
+    },
+    {
+      "id": "type:ibm-plex-mono",
+      "family": "IBM Plex Mono",
+      "roles": [
+        "mono",
+        "code",
+        "meta"
+      ],
+      "license": "SIL OFL 1.1",
+      "license_path": "assets/fonts/OFL.txt",
+      "files": [
+        {
+          "path": "assets/fonts/IBMPlexMono-Regular.ttf",
+          "sha256": "6a3412f058c7d8dfd9170c41e85ade48e5156ecb89356110ca57a0a27734af46"
+        },
+        {
+          "path": "assets/fonts/IBMPlexMono-Medium.ttf",
+          "sha256": "a9b4c49bb299e05b5f6c481e7fb5e78943d2793249a0c8874ab574a2d1ea6755"
+        }
+      ]
+    }
+  ],
+  "type_note": "Prim prefers Instrument Sans + IBM Plex Mono on the web. Both are OFL and shipped in-pack. kit.css @font-face loads these files; do not substitute Space Grotesk or Inter unless this pack says so.",
+  "voice": {
+    "attributes": [
+      "Precise",
+      "calm",
+      "absolute without volume"
+    ],
+    "do": [
+      "Name the file. Name the view.",
+      "Prefer one sentence that holds.",
+      "Speak as infrastructure, not a launch."
+    ],
+    "dont": [
+      "Hype.",
+      "Consumer-app cheerfulness.",
+      "Eidos company doctrine or the house brass/cream story.",
+      "Cold blue #6c8aff."
+    ]
+  },
+  "modes": [
+    "paper",
+    "ink",
+    "system"
+  ],
+  "content_blocks": [
+    {
+      "id": "block:lede",
+      "name": "Lede",
+      "when": "Opening summary. One paragraph under the title.",
+      "refuses": [
+        "hero subcopy with three clauses of hype",
+        "consumer-app cheerfulness"
+      ],
+      "states": [
+        "default"
+      ],
+      "dir": "blocks/lede"
+    },
+    {
+      "id": "block:page-hero",
+      "name": "PageHero",
+      "when": "Page header. One h1. Mark optional.",
+      "refuses": [
+        "two H1s",
+        "gradient mesh behind the title",
+        "Eidos tridot"
+      ],
+      "states": [
+        "default"
+      ],
+      "dir": "blocks/page-hero"
+    }
+  ],
+  "deprecated": {
+    "hex": [
+      "#6c8aff"
+    ],
+    "note": "Eidos cold blue is not Prim. Do not import it. Prim gold is #e8c547."
+  }
+}
