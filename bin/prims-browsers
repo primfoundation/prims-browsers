@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+"""Prims Browsers — headed Chromium per tenant.
+
+Tenant list is tenants.json (source=mock). Later: `prims-desktop tenants --json`.
+Hands are ours: CDP first, VNC/xdotool if the page will not yield.
+Not eidos-browsing.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from lib import cdp as cdp_lib  # noqa: E402
+TENANTS_PATH = ROOT / "tenants.json"
+WEB_DIR = ROOT / "web"
+DESK_HOST = "127.0.0.1"
+DESK_PORT = int(os.environ.get("PRIMS_BROWSERS_PORT") or "7751")
+DESK_URL = f"http://{DESK_HOST}:{DESK_PORT}/"
+PID_PATH = ROOT / ".desk.pid"
+
+USAGE = """prims-browsers — headed Chromium per tenant (mock)
+
+  prims-browsers tenants
+  prims-browsers status [<id>]
+  prims-browsers vnc <id>
+  prims-browsers open
+  prims-browsers serve
+  prims-browsers target <id>
+  prims-browsers tabs <id>
+  prims-browsers screenshot <id> [--out path]
+  prims-browsers click <id> <selector>
+  prims-browsers type <id> <selector> <text>
+  prims-browsers doctor
+  prims-browsers vnc-key <id> <Key>
+  prims-browsers vnc-type <id> <text>
+  prims-browsers vnc-click <id> <x> <y>
+
+Hands: CDP (fast), then VNC/xdotool. Address is the tenant/jar id.
+"""
+
+
+def load_doc() -> dict:
+    return json.loads(TENANTS_PATH.read_text())
+
+
+def cdp_base(row: dict) -> str:
+    glass = row.get("glass") or {}
+    url = glass.get("cdp")
+    if not url:
+        raise SystemExit(f"{row.get('id')} has no CDP")
+    return url.rstrip("/")
+
+
+def docker_exec(container: str, args: list[str], check: bool = True) -> subprocess.CompletedProcess:
+    cmd = ["docker", "exec", "-e", "DISPLAY=:0", container, *args]
+    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+
+
+def vnc_container(row: dict) -> str:
+    glass = row.get("glass") or {}
+    name = glass.get("container")
+    if not name:
+        raise SystemExit(f"{row.get('id')} has no glass container")
+    return name
+
+
+def tenants(doc: dict) -> list[dict]:
+    rows = doc.get("tenants") or []
+    if not isinstance(rows, list):
+        raise SystemExit("tenants.json: tenants must be a list")
+    return rows
+
+
+def find_tenant(doc: dict, tid: str) -> dict:
+    for row in tenants(doc):
+        if row.get("id") == tid:
+            return row
+    raise SystemExit(f"unknown tenant {tid}")
+
+
+def want_json(args: list[str]) -> bool:
+    return "--json" in args
+
+
+def strip_flags(args: list[str]) -> list[str]:
+    return [a for a in args if a != "--json" and a != "--help" and a != "-h"]
+
+
+def emit(data, json_mode: bool, text: str, status: int = 0) -> int:
+    if json_mode:
+        sys.stdout.write(json.dumps(data, indent=2) + "\n")
+    else:
+        if text:
+            sys.stdout.write(text if text.endswith("\n") else text + "\n")
+    return status
+
+
+def http_ok(url: str, timeout: float = 2.0) -> tuple[bool, str]:
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            return (200 <= res.status < 300, f"http {res.status}")
+    except urllib.error.HTTPError as e:
+        return (False, f"http {e.code}")
+    except Exception as e:
+        return (False, str(e).split("\n")[0][:120])
+
+
+def docker_running(name: str) -> tuple[bool, str]:
+    try:
+        out = subprocess.check_output(
+            ["docker", "inspect", "-f", "{{.State.Running}}", name],
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=5,
+        ).strip()
+        return (out == "true", "running" if out == "true" else f"state={out}")
+    except subprocess.CalledProcessError as e:
+        err = (e.output or "").strip().split("\n")[-1][:120]
+        return (False, err or "docker inspect failed")
+    except FileNotFoundError:
+        return (False, "docker not found")
+    except Exception as e:
+        return (False, str(e)[:120])
+
+
+def glass_status(row: dict) -> dict:
+    glass = row.get("glass") or None
+    if not glass:
+        return {
+            "id": row["id"],
+            "label": row.get("label") or row["id"],
+            "sandbox": row.get("sandbox") or f"sandbox:{row['id']}",
+            "state": "mocked",
+            "glass": None,
+        }
+    container = glass.get("container")
+    vnc = glass.get("vnc")
+    running, run_detail = docker_running(container) if container else (False, "no container")
+    vnc_ok, vnc_detail = http_ok(vnc) if vnc else (False, "no vnc")
+    if running and vnc_ok:
+        state = "live"
+    elif running or vnc_ok:
+        state = "degraded"
+    else:
+        state = "down"
+    return {
+        "id": row["id"],
+        "label": row.get("label") or row["id"],
+        "sandbox": row.get("sandbox") or f"sandbox:{row['id']}",
+        "state": state,
+        "glass": {
+            "container": container,
+            "container_ok": running,
+            "container_detail": run_detail,
+            "vnc": vnc,
+            "vnc_ok": vnc_ok,
+            "vnc_detail": vnc_detail,
+            "cdp": glass.get("cdp"),
+            "hub": glass.get("hub"),
+        },
+    }
+
+
+def cmd_tenants(doc: dict, json_mode: bool) -> int:
+    rows = [
+        {
+            "id": t["id"],
+            "label": t.get("label") or t["id"],
+            "sandbox": t.get("sandbox") or f"sandbox:{t['id']}",
+            "has_glass": bool(t.get("glass")),
+        }
+        for t in tenants(doc)
+    ]
+    payload = {"source": doc.get("source") or "mock", "later": doc.get("later"), "tenants": rows}
+    lines = [f"{r['id']:8} {r['label']:12} {r['sandbox']:16} {'glass' if r['has_glass'] else 'mocked'}" for r in rows]
+    header = f"source={payload['source']}  later={payload['later']}\n"
+    return emit(payload, json_mode, header + "\n".join(lines))
+
+
+def cmd_status(doc: dict, tid: str | None, json_mode: bool) -> int:
+    rows = tenants(doc) if tid is None else [find_tenant(doc, tid)]
+    reports = [glass_status(r) for r in rows]
+    payload = {"source": doc.get("source") or "mock", "tenants": reports}
+    lines = []
+    for r in reports:
+        extra = ""
+        if r["state"] != "mocked" and r.get("glass"):
+            extra = f"  {r['glass'].get('vnc') or ''}"
+        lines.append(f"{r['id']:8} {r['state']:8} {r['sandbox']}{extra}")
+    return emit(payload, json_mode, "\n".join(lines))
+
+
+def cmd_target(doc: dict, tid: str | None, json_mode: bool) -> int:
+    if not tid:
+        return emit({"error": "target needs a tenant id"}, json_mode, "target needs a tenant id", 2)
+    row = find_tenant(doc, tid)
+    glass = row.get("glass") or {}
+    payload = {
+        "id": row["id"],
+        "cdp": glass.get("cdp"),
+        "vnc": glass.get("vnc"),
+        "container": glass.get("container"),
+        "hands": ["cdp", "vnc"],
+    }
+    return emit(payload, json_mode, f"{row['id']}  cdp={glass.get('cdp') or '-'}  vnc={glass.get('vnc') or '-'}")
+
+
+def desk_health() -> tuple[bool, str]:
+    return http_ok(f"http://{DESK_HOST}:{DESK_PORT}/health")
+
+
+class DeskHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(WEB_DIR), **kwargs)
+
+    def log_message(self, fmt: str, *args) -> None:
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def do_GET(self) -> None:
+        if self.path in ("/", "/index.html"):
+            return self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
+        if self.path in ("/desk.css",):
+            return self._send_file(WEB_DIR / "desk.css", "text/css; charset=utf-8")
+        if self.path in ("/desk.js",):
+            return self._send_file(WEB_DIR / "desk.js", "text/javascript; charset=utf-8")
+        if self.path in ("/health", "/health/"):
+            return self._send_json({"ok": True, "product": "prims-browsers", "url": DESK_URL})
+        if self.path in ("/tenants.json",):
+            return self._send_file(TENANTS_PATH, "application/json")
+        if self.path in ("/api/status",):
+            doc = load_doc()
+            reports = [glass_status(r) for r in tenants(doc)]
+            return self._send_json({"source": doc.get("source") or "mock", "later": doc.get("later"), "tenants": reports})
+        self.send_error(404, "not a desk path")
+
+    def _send_file(self, path: Path, content_type: str) -> None:
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_json(self, payload: dict) -> None:
+        data = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def cmd_serve(json_mode: bool) -> int:
+    httpd = ThreadingHTTPServer((DESK_HOST, DESK_PORT), DeskHandler)
+    PID_PATH.write_text(str(os.getpid()))
+    payload = {"ok": True, "url": DESK_URL, "pid": os.getpid()}
+    if json_mode:
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
+    else:
+        sys.stdout.write(f"desk {DESK_URL}\n")
+        sys.stdout.flush()
+    try:
+        httpd.serve_forever()
+    finally:
+        if PID_PATH.exists() and PID_PATH.read_text().strip() == str(os.getpid()):
+            PID_PATH.unlink(missing_ok=True)
+    return 0
+
+
+def ensure_desk() -> tuple[bool, str]:
+    ok, detail = desk_health()
+    if ok:
+        return True, "already up"
+    log = ROOT / ".desk.log"
+    proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "bin" / "prims-browsers"), "serve"],
+        stdout=log.open("a"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    for _ in range(30):
+        time.sleep(0.1)
+        ok, detail = desk_health()
+        if ok:
+            PID_PATH.write_text(str(proc.pid))
+            return True, f"spawned pid {proc.pid}"
+    return False, f"desk did not come up ({detail})"
+
+
+def cmd_open(json_mode: bool) -> int:
+    ok, detail = ensure_desk()
+    payload = {"ok": ok, "url": DESK_URL, "detail": detail}
+    if not ok:
+        return emit(payload, json_mode, f"desk failed: {detail}", 1)
+    if json_mode:
+        return emit(payload, True, "")
+    subprocess.Popen(["open", DESK_URL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return emit({**payload, "opened": True}, False, f"open {DESK_URL} ({detail})")
+
+
+def cmd_vnc(doc: dict, tid: str | None, json_mode: bool) -> int:
+    if not tid:
+        return emit({"error": "vnc needs a tenant id"}, json_mode, "vnc needs a tenant id", 2)
+    report = glass_status(find_tenant(doc, tid))
+    if report["state"] == "mocked":
+        return emit(
+            {**report, "error": "no glass yet (mock tenant)"},
+            json_mode,
+            f"{tid} is mocked — no VNC. Only tenants with glass in tenants.json open.",
+            2,
+        )
+    url = (report.get("glass") or {}).get("vnc")
+    if not url:
+        return emit({**report, "error": "no vnc url"}, json_mode, f"{tid} has no vnc url", 2)
+    if json_mode:
+        return emit({**report, "opened": False, "vnc": url}, True, "")
+    # Headed takeover is the point. JSON stays quiet so machines don't spawn windows.
+    subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return emit({**report, "opened": True, "vnc": url}, False, f"open {url}")
+
+
+def cmd_tabs(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if not rest:
+        return emit({"error": "tabs needs a tenant id"}, json_mode, "tabs needs a tenant id", 2)
+    row = find_tenant(doc, rest[0])
+    try:
+        plist = cdp_lib.pages(cdp_base(row))
+    except Exception as e:
+        err = str(e) or type(e).__name__
+        return emit({"error": err, "via": "cdp"}, json_mode, f"cdp failed: {err}", 1)
+    payload = {"id": row["id"], "via": "cdp", "tabs": plist}
+    lines = [f"{p['id'][:8]}  {p['title'][:40]:40}  {p['url']}" for p in plist]
+    return emit(payload, json_mode, "\n".join(lines) or "(no pages)")
+
+
+def cmd_screenshot(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if not rest:
+        return emit({"error": "screenshot needs a tenant id"}, json_mode, "screenshot needs a tenant id", 2)
+    row = find_tenant(doc, rest[0])
+    out = None
+    args = rest[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--out" and i + 1 < len(args):
+            out = args[i + 1]
+            i += 2
+            continue
+        i += 1
+    try:
+        page, ws = cdp_lib.first_page_ws(cdp_base(row))
+        result = cdp_lib.call(ws, "Page.captureScreenshot", {"format": "png"})
+    except Exception as e:
+        err = str(e) or type(e).__name__
+        return emit({"error": err, "via": "cdp"}, json_mode, f"cdp failed: {err}", 1)
+    data = result.get("data")
+    if not data:
+        return emit({"error": "no screenshot data", "via": "cdp"}, json_mode, "no screenshot data", 1)
+    out = out or f"/tmp/prims-browsers-{row['id']}.png"
+    Path(out).write_bytes(base64.b64decode(data))
+    payload = {"ok": True, "via": "cdp", "path": out, "url": page.get("url"), "tab": page.get("id")}
+    return emit(payload, json_mode, f"{out}  {page.get('url')}")
+
+
+def cmd_click(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if len(rest) < 2:
+        return emit({"error": "click <id> <selector>"}, json_mode, "click <id> <selector>", 2)
+    row = find_tenant(doc, rest[0])
+    sel = rest[1]
+    expr = (
+        "(function(){ const el = document.querySelector("
+        + json.dumps(sel)
+        + "); if (!el) return {ok:false, error:'not found'}; el.click(); return {ok:true, tag: el.tagName}; })()"
+    )
+    try:
+        _page, ws = cdp_lib.first_page_ws(cdp_base(row))
+        result = cdp_lib.call(ws, "Runtime.evaluate", {"expression": expr, "returnByValue": True})
+        val = (result or {}).get("result", {}).get("value") or {}
+    except Exception as e:
+        return emit({"error": str(e), "via": "cdp", "hint": "vnc-click"}, json_mode, f"cdp failed: {e} (try vnc-click)", 1)
+    ok = bool(val.get("ok"))
+    payload = {"ok": ok, "via": "cdp", "selector": sel, **{k: val[k] for k in val if k != "ok"}}
+    return emit(payload, json_mode, f"click {sel} via=cdp ok={ok}", 0 if ok else 1)
+
+
+def cmd_type(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if len(rest) < 3:
+        return emit({"error": "type <id> <selector> <text>"}, json_mode, "type <id> <selector> <text>", 2)
+    row = find_tenant(doc, rest[0])
+    sel, text = rest[1], " ".join(rest[2:])
+    expr = (
+        "(function(){ const el = document.querySelector("
+        + json.dumps(sel)
+        + "); if (!el) return {ok:false, error:'not found'};"
+        + " el.focus(); el.value = "
+        + json.dumps(text)
+        + "; el.dispatchEvent(new Event('input', {bubbles:true}));"
+        + " return {ok:true}; })()"
+    )
+    try:
+        _page, ws = cdp_lib.first_page_ws(cdp_base(row))
+        result = cdp_lib.call(ws, "Runtime.evaluate", {"expression": expr, "returnByValue": True})
+        val = (result or {}).get("result", {}).get("value") or {}
+    except Exception as e:
+        return emit({"error": str(e), "via": "cdp", "hint": "vnc-type"}, json_mode, f"cdp failed: {e} (try vnc-type)", 1)
+    ok = bool(val.get("ok"))
+    payload = {"ok": ok, "via": "cdp", "selector": sel, "n": len(text)}
+    return emit(payload, json_mode, f"type {sel} via=cdp ok={ok}", 0 if ok else 1)
+
+
+def cmd_vnc_key(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if len(rest) < 2:
+        return emit({"error": "vnc-key <id> <Key>"}, json_mode, "vnc-key <id> <Key>", 2)
+    row = find_tenant(doc, rest[0])
+    key = rest[1]
+    container = vnc_container(row)
+    proc = docker_exec(container, ["xdotool", "key", key], check=False)
+    payload = {"ok": proc.returncode == 0, "via": "vnc", "key": key, "stderr": (proc.stderr or "").strip()[:200]}
+    return emit(payload, json_mode, f"vnc-key {key} via={payload['via']} ok={payload['ok']}", 0 if payload["ok"] else 1)
+
+
+def cmd_vnc_type(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if len(rest) < 2:
+        return emit({"error": "vnc-type <id> <text>"}, json_mode, "vnc-type <id> <text>", 2)
+    row = find_tenant(doc, rest[0])
+    text = " ".join(rest[1:])
+    container = vnc_container(row)
+    proc = docker_exec(container, ["xdotool", "type", "--clearmodifiers", text], check=False)
+    payload = {"ok": proc.returncode == 0, "via": "vnc", "n": len(text), "stderr": (proc.stderr or "").strip()[:200]}
+    return emit(payload, json_mode, f"vnc-type n={len(text)} ok={payload['ok']}", 0 if payload["ok"] else 1)
+
+
+def cmd_vnc_click(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if len(rest) < 3:
+        return emit({"error": "vnc-click <id> <x> <y>"}, json_mode, "vnc-click <id> <x> <y>", 2)
+    row = find_tenant(doc, rest[0])
+    x, y = rest[1], rest[2]
+    container = vnc_container(row)
+    proc = docker_exec(container, ["xdotool", "mousemove", x, y, "click", "1"], check=False)
+    payload = {"ok": proc.returncode == 0, "via": "vnc", "x": x, "y": y, "stderr": (proc.stderr or "").strip()[:200]}
+    return emit(payload, json_mode, f"vnc-click {x},{y} ok={payload['ok']}", 0 if payload["ok"] else 1)
+
+
+def cmd_doctor(doc: dict, json_mode: bool) -> int:
+    reports = [glass_status(r) for r in tenants(doc)]
+    ids = [r["id"] for r in reports]
+    expected = ["eidos", "gmw", "aic", "arp", "reeves"]
+    live = [r for r in reports if r["state"] == "live"]
+    mocked = [r for r in reports if r["state"] == "mocked"]
+    findings = []
+    if ids != expected:
+        findings.append(f"tenant ids {ids} != {expected}")
+    if (doc.get("source") or "") != "mock":
+        findings.append("source should stay mock until prims-desktop tenants exists")
+    if not live:
+        findings.append("no live glass (expected gmw on the sample jar)")
+    cdp_ok = False
+    cdp_detail = "no live cdp"
+    if live:
+        try:
+            ver = cdp_lib.version(cdp_base(find_tenant(doc, live[0]["id"])))
+            cdp_ok = True
+            cdp_detail = ver.get("Browser") or "ok"
+        except Exception as e:
+            cdp_detail = str(e)[:120]
+            findings.append(f"cdp: {cdp_detail}")
+    desk_ok, desk_detail = desk_health()
+    ok = not findings
+    payload = {
+        "ok": ok,
+        "source": doc.get("source"),
+        "later": doc.get("later"),
+        "desk": {"url": DESK_URL, "ok": desk_ok, "detail": desk_detail},
+        "cdp": {"ok": cdp_ok, "detail": cdp_detail},
+        "tenants": ids,
+        "live": [r["id"] for r in live],
+        "mocked": [r["id"] for r in mocked],
+        "findings": findings,
+        "reports": reports,
+    }
+    text = (
+        f"ok={ok} source={doc.get('source')} live={','.join(payload['live']) or '-'} "
+        f"mocked={len(mocked)}/{len(reports)} desk={'up' if desk_ok else 'down'} "
+        f"cdp={'up' if cdp_ok else 'down'}"
+    )
+    if findings:
+        text += "\n" + "\n".join(f"- {f}" for f in findings)
+    return emit(payload, json_mode, text, 0 if ok else 1)
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    json_mode = want_json(args)
+    if not args or args[0] in ("-h", "--help", "help"):
+        sys.stdout.write(USAGE)
+        return 0
+    pos = strip_flags(args)
+    if not pos:
+        sys.stdout.write(USAGE)
+        return 0
+    cmd, rest = pos[0], pos[1:]
+    doc = load_doc()
+    if cmd in ("tenants", "list"):
+        return cmd_tenants(doc, json_mode)
+    if cmd == "status":
+        return cmd_status(doc, rest[0] if rest else None, json_mode)
+    if cmd == "target":
+        return cmd_target(doc, rest[0] if rest else None, json_mode)
+    if cmd == "vnc":
+        return cmd_vnc(doc, rest[0] if rest else None, json_mode)
+    if cmd == "serve":
+        return cmd_serve(json_mode)
+    if cmd in ("open", "desk"):
+        return cmd_open(json_mode)
+    if cmd == "tabs":
+        return cmd_tabs(doc, rest, json_mode)
+    if cmd == "screenshot":
+        return cmd_screenshot(doc, rest, json_mode)
+    if cmd == "click":
+        return cmd_click(doc, rest, json_mode)
+    if cmd == "type":
+        return cmd_type(doc, rest, json_mode)
+    if cmd == "vnc-key":
+        return cmd_vnc_key(doc, rest, json_mode)
+    if cmd == "vnc-type":
+        return cmd_vnc_type(doc, rest, json_mode)
+    if cmd == "vnc-click":
+        return cmd_vnc_click(doc, rest, json_mode)
+    if cmd == "doctor":
+        return cmd_doctor(doc, json_mode)
+    return emit({"error": f"unknown command {cmd}"}, json_mode, f"unknown command {cmd}\n{USAGE}", 1)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except KeyboardInterrupt:
+        raise SystemExit(130)

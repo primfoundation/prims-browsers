@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prims Browsers</title>
+  <link rel="stylesheet" href="/desk.css">
+</head>
+<body>
+  <aside class="rail" aria-label="Tenants">
+    <p class="kicker">Prims Browsers</p>
+    <p class="sub">Glass sits in the desk. Close the view; the jar keeps running.</p>
+    <ul id="rail"></ul>
+    <p class="foot" id="source"></p>
+  </aside>
+  <main class="stage">
+    <header class="stage-bar">
+      <div>
+        <h1 id="title">Pick a tenant</h1>
+        <p id="meta" class="meta"></p>
+      </div>
+      <div class="acts">
+        <button type="button" id="watch" hidden>Open in its own tab</button>
+        <button type="button" id="close" hidden>Close this view</button>
+      </div>
+    </header>
+    <div id="empty" class="empty">Five desks. Click Greenmark to embed the glass here.</div>
+    <iframe id="glass" title="Tenant Chromium"></iframe>
+  </main>
+  <script src="/desk.js"></script>
+</body>
+</html>

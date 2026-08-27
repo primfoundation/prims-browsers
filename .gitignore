@@ -1,0 +1,5 @@
+.desk.pid
+.desk.log
+__pycache__/
+*.pyc
+.DS_Store
