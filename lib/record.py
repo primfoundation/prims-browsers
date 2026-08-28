@@ -93,11 +93,11 @@ def clear_state(tid: str) -> None:
 def display_size(container: str) -> str:
     proc = exec_in(
         container,
-        ["sh", "-c", 'echo ${DISPLAY_WIDTH:-1280}x${DISPLAY_HEIGHT:-800}'],
+        ["sh", "-c", 'echo ${DISPLAY_WIDTH:-1920}x${DISPLAY_HEIGHT:-1080}'],
     )
     size = (proc.stdout or "").strip()
     if not size or "x" not in size:
-        return "1280x800"
+        return "1920x1080"
     return size
 
 

@@ -6,12 +6,12 @@ from lib import record
 
 
 def test_ffmpeg_cmd_is_x11grab_on_display_zero():
-    cmd = record.ffmpeg_cmd("1280x800", 10, record.JAR_MP4)
+    cmd = record.ffmpeg_cmd("1920x1080", 10, record.JAR_MP4)
     assert cmd[:3] == ["ffmpeg", "-y", "-nostdin"]
     assert "-f" in cmd and "x11grab" in cmd
     assert ":0.0" in cmd
     assert "libx264" in cmd
-    assert "1280x800" in cmd
+    assert "1920x1080" in cmd
     assert cmd[-1] == record.JAR_MP4
 
 
