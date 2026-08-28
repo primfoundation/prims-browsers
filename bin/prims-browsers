@@ -74,6 +74,7 @@ USAGE = """prims-browsers — headed Chromium per tenant (mock)
   prims-browsers click <id> <selector>
   prims-browsers type <id> <selector> <text>
   prims-browsers nav <id> <url>
+  prims-browsers focus <id> <url>
   prims-browsers doctor
   prims-browsers test
   prims-browsers vnc-key <id> <Key>
@@ -1528,6 +1529,21 @@ def cmd_nav(doc: dict, rest: list[str], json_mode: bool) -> int:
     return emit(payload, json_mode, f"nav {url} via=cdp")
 
 
+def cmd_focus(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if len(rest) < 2:
+        return emit({"error": "focus <id> <url>"}, json_mode, "focus <id> <url>", 2)
+    row = find_tenant(doc, rest[0])
+    url = rest[1]
+    try:
+        with steering(row["id"], "focus"):
+            tab = cdp_lib.front_tab(cdp_base(row), url)
+    except Exception as e:
+        err = str(e) or type(e).__name__
+        return emit({"error": err, "via": "cdp"}, json_mode, f"cdp failed: {err}", 1)
+    payload = {"ok": True, "via": "cdp", "tab": tab.get("id"), "url": tab.get("url"), "title": tab.get("title")}
+    return emit(payload, json_mode, f"focus {tab.get('url')} tab={str(tab.get('id') or '')[:8]}")
+
+
 def cmd_click(doc: dict, rest: list[str], json_mode: bool) -> int:
     if len(rest) < 2:
         return emit({"error": "click <id> <selector>"}, json_mode, "click <id> <selector>", 2)
@@ -1768,6 +1784,8 @@ def main(argv: list[str]) -> int:
         return cmd_screenshot(doc, rest, json_mode)
     if cmd == "nav":
         return cmd_nav(doc, rest, json_mode)
+    if cmd == "focus":
+        return cmd_focus(doc, rest, json_mode)
     if cmd == "click":
         return cmd_click(doc, rest, json_mode)
     if cmd == "type":
