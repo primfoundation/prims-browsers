@@ -11,23 +11,55 @@ from __future__ import annotations
 import base64
 import json
 import os
+import queue
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from lib import cdp as cdp_lib  # noqa: E402
-TENANTS_PATH = ROOT / "tenants.json"
+from lib import gate as gate_lib  # noqa: E402
+from lib import watch as watch_lib  # noqa: E402
+from lib import tabs as tabs_lib  # noqa: E402
+from lib import actlog  # noqa: E402
+from lib import vault as vault_lib  # noqa: E402
+from lib import login as login_lib  # noqa: E402
+from lib import chrome_prefs  # noqa: E402
+from lib import record as record_lib  # noqa: E402
+TENANTS_PATH = Path(os.environ.get("PRIMS_BROWSERS_TENANTS") or ROOT / "tenants.json")
 WEB_DIR = ROOT / "web"
 DESK_HOST = "127.0.0.1"
 DESK_PORT = int(os.environ.get("PRIMS_BROWSERS_PORT") or "7751")
 DESK_URL = f"http://{DESK_HOST}:{DESK_PORT}/"
-PID_PATH = ROOT / ".desk.pid"
+PID_PATH = ROOT / f".desk.{DESK_PORT}.pid"
+STAMP_PATH = ROOT / f".desk.{DESK_PORT}.stamp"
+_SSE = []
+_SSE_LOCK = threading.Lock()
+_STEERS: dict[str, dict] = {}
+_GATES: dict[str, dict] = {}
+_GATE_WAIT: dict[str, threading.Event] = {}
+_WORK: dict[str, dict] = {}
+_LOGIN: dict[str, dict] = {}
+_LOGIN_ASKED: dict[str, dict[str, str]] = {}
+_LOGIN_HOST: dict[str, str] = {}
+_LOGIN_PAYLOAD: dict[str, dict] = {}
+STEER_HOLD = 15.0
+WORK_URLS = {
+    "eidos": "https://chatgpt.com/",
+    "gmw": "https://www.amazon.com/",
+    "aic": "https://www.bbc.com/news",
+    "arp": "https://www.npr.org/",
+    "reeves": "https://www.theguardian.com/us",
+}
 
 USAGE = """prims-browsers — headed Chromium per tenant (mock)
 
@@ -41,10 +73,16 @@ USAGE = """prims-browsers — headed Chromium per tenant (mock)
   prims-browsers screenshot <id> [--out path]
   prims-browsers click <id> <selector>
   prims-browsers type <id> <selector> <text>
+  prims-browsers nav <id> <url>
   prims-browsers doctor
+  prims-browsers test
   prims-browsers vnc-key <id> <Key>
   prims-browsers vnc-type <id> <text>
+  prims-browsers vnc-move <id> <x> <y>
   prims-browsers vnc-click <id> <x> <y>
+  prims-browsers record <id> start [--out path] [--fps N]
+  prims-browsers record <id> stop
+  prims-browsers record <id> status
 
 Hands: CDP (fast), then VNC/xdotool. Address is the tenant/jar id.
 """
@@ -178,7 +216,7 @@ def cmd_tenants(doc: dict, json_mode: bool) -> int:
         {
             "id": t["id"],
             "label": t.get("label") or t["id"],
-            "sandbox": t.get("sandbox") or f"sandbox:{t['id']}",
+            "home": t.get("home"),
             "has_glass": bool(t.get("glass")),
         }
         for t in tenants(doc)
@@ -221,6 +259,861 @@ def desk_health() -> tuple[bool, str]:
     return http_ok(f"http://{DESK_HOST}:{DESK_PORT}/health")
 
 
+def source_mtime() -> float:
+    m = 0.0
+    bin_path = ROOT / "bin" / "prims-browsers"
+    if bin_path.is_file():
+        m = max(m, bin_path.stat().st_mtime)
+    for folder in (ROOT / "lib", ROOT / "web"):
+        if not folder.is_dir():
+            continue
+        for f in folder.rglob("*"):
+            if f.is_file() and f.suffix in {".py", ".js", ".css", ".html"}:
+                m = max(m, f.stat().st_mtime)
+    return m
+
+
+def desk_stale() -> bool:
+    if not STAMP_PATH.is_file():
+        return True
+    try:
+        return float(STAMP_PATH.read_text().strip()) + 0.2 < source_mtime()
+    except Exception:
+        return True
+
+
+def kill_desk() -> None:
+    if not PID_PATH.is_file():
+        return
+    try:
+        pid = int(PID_PATH.read_text().strip())
+    except Exception:
+        return
+    if pid <= 0:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        pass
+    for _ in range(20):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+    PID_PATH.unlink(missing_ok=True)
+    STAMP_PATH.unlink(missing_ok=True)
+
+
+def ask_set(tid: str, host: str, status: str) -> None:
+    if not tid or not host:
+        return
+    with _SSE_LOCK:
+        _LOGIN_ASKED.setdefault(tid, {})[host] = status
+        _LOGIN_HOST[tid] = host
+
+
+def ask_get(tid: str, host: str) -> str | None:
+    with _SSE_LOCK:
+        return (_LOGIN_ASKED.get(tid) or {}).get(host)
+
+
+def ask_payload_set(tid: str, payload: dict) -> None:
+    with _SSE_LOCK:
+        _LOGIN_PAYLOAD[tid] = payload
+
+
+def ask_payload_get(tid: str) -> dict | None:
+    with _SSE_LOCK:
+        row = _LOGIN_PAYLOAD.get(tid)
+        host = _LOGIN_HOST.get(tid)
+        status = (_LOGIN_ASKED.get(tid) or {}).get(host) if host else None
+    if status == "pending" and row:
+        return dict(row)
+    return None
+
+
+def ask_payload_clear(tid: str) -> None:
+    with _SSE_LOCK:
+        _LOGIN_PAYLOAD.pop(tid, None)
+
+
+def pending_asks() -> list[dict]:
+    with _SSE_LOCK:
+        items = [
+            (tid, host)
+            for tid, hosts in _LOGIN_ASKED.items()
+            for host, status in (hosts or {}).items()
+            if status == "pending"
+        ]
+    out: list[dict] = []
+    for tid, host in items:
+        row = ask_payload_get(tid)
+        if not row:
+            row = vault_lib.ask_bundle(tid, host)
+            ask_payload_set(tid, row)
+        out.append(row)
+    return out
+
+
+def wait_until_ungated(tid: str, cdp: str, tab: dict | None, timeout: float = 3600.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if wait_gate_clear(tid, 1.2):
+            return True
+        page = tab
+        if page and page.get("id"):
+            try:
+                plist = cdp_lib.pages(cdp)
+                page = next((p for p in plist if p.get("id") == page.get("id")), page)
+            except Exception:
+                page = tab
+        try:
+            hit = gate_lib.inspect_page(page) if page else gate_lib.inspect_front(cdp)
+        except Exception:
+            hit = {"gated": False}
+        if not hit.get("gated") or not gate_lib.is_hard(hit.get("reason")):
+            set_gate(tid, False, None)
+            actlog.add("gate.auto_clear", id=tid, reason=hit.get("reason"))
+            return True
+        with _SSE_LOCK:
+            filling = tid in _LOGIN
+        if filling and hit.get("reason") == "login":
+            continue
+        set_gate(tid, True, hit.get("reason"))
+    return False
+
+
+def sse_broadcast(event: str, data: dict) -> None:
+    blob = f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+    with _SSE_LOCK:
+        clients = list(_SSE)
+    dead = []
+    for q in clients:
+        try:
+            q.put_nowait(blob)
+        except Exception:
+            dead.append(q)
+    if dead:
+        with _SSE_LOCK:
+            for q in dead:
+                if q in _SSE:
+                    _SSE.remove(q)
+
+
+def steer_view(for_id: str | None = None) -> dict:
+    now = time.time()
+    tid = for_id
+    with _SSE_LOCK:
+        snap = dict(_STEERS.get(tid) or {}) if tid else {}
+        if not tid and _STEERS:
+            # newest touch, for a generic peek
+            tid = max(_STEERS.items(), key=lambda kv: float(kv[1].get("last_touch") or 0))[0]
+            snap = dict(_STEERS.get(tid) or {})
+    last = snap.get("last_touch")
+    taken = snap.get("on") is False or last is None or not snap.get("id")
+    alive = (not taken) and (now - float(last)) < STEER_HOLD
+    out_id = snap.get("id") or tid
+    return {
+        "id": out_id,
+        "verb": snap.get("verb") if alive else None,
+        "on": alive,
+        "last_touch": last if alive else None,
+        "ago": (now - float(last)) if alive and last is not None else None,
+        "hold": STEER_HOLD,
+        "host": snap.get("host") if alive else None,
+    }
+
+
+def steer_list() -> list[dict]:
+    with _SSE_LOCK:
+        ids = list(_STEERS.keys())
+    return [s for tid in ids if (s := steer_view(tid)).get("on")]
+
+
+def front_host(cdp: str) -> str:
+    try:
+        vis = cdp_lib.visible_page(cdp)
+        url = (vis or {}).get("url") or ""
+        if not url:
+            plist = cdp_lib.pages(cdp)
+            url = (plist[0].get("url") if plist else "") or ""
+        return vault_lib.page_host(url)
+    except Exception:
+        return ""
+
+
+def gate_view(tid: str) -> dict:
+    with _SSE_LOCK:
+        g = dict(_GATES.get(tid) or {"id": tid, "gated": False, "reason": None})
+    g["label"] = gate_lib.label(g.get("reason")) if g.get("gated") else None
+    return g
+
+
+def set_gate(tid: str, gated: bool, reason: str | None = None) -> dict:
+    now = {"id": tid, "gated": bool(gated), "reason": reason if gated else None}
+    with _SSE_LOCK:
+        prev = _GATES.get(tid) or {}
+        changed = bool(prev.get("gated")) != now["gated"] or prev.get("reason") != now["reason"]
+        _GATES[tid] = now
+        ev = _GATE_WAIT.setdefault(tid, threading.Event())
+        if gated:
+            ev.clear()
+        else:
+            ev.set()
+    snap = {**now, "label": gate_lib.label(now.get("reason")) if now["gated"] else None}
+    if changed:
+        actlog.add("gate", id=tid, gated=now["gated"], reason=now.get("reason"), label=snap.get("label"))
+        sse_broadcast("gate", snap)
+        if not gated:
+            set_steer(tid, "surf", True)
+    return snap
+
+
+def wait_gate_clear(tid: str, timeout: float = 300.0) -> bool:
+    ev = _GATE_WAIT.setdefault(tid, threading.Event())
+    return ev.wait(timeout=timeout)
+
+
+def emit_tabs(tid: str, cdp: str) -> None:
+    try:
+        plist = cdp_lib.pages(cdp)
+    except Exception:
+        return
+    vis = gate_lib.inspect_front(cdp)
+    front_id = vis.get("tab") or (plist[0]["id"] if plist else None)
+    gated_ids = {vis["tab"]} if vis.get("gated") and vis.get("tab") else set()
+    row = tabs_lib.record(tid, plist, front_id, gated_ids)
+    host = ""
+    for t in row.get("tabs") or []:
+        if t.get("front"):
+            host = t.get("host") or ""
+            break
+    sse_broadcast(
+        "tabs",
+        {
+            "id": tid,
+            "tabs": row.get("tabs") or [],
+            "active": row.get("front"),
+            "work": row.get("work"),
+            "host": host,
+        },
+    )
+    href = vis.get("href") or ""
+    host = host or vault_lib.page_host(href)
+    with _SSE_LOCK:
+        busy = tid in _LOGIN
+    if vis.get("reason") == "login":
+        if busy:
+            return
+        bundle = vault_lib.ask_bundle(tid, host, href) if host else {
+            "id": tid,
+            "host": host,
+            "href": href,
+            "reason": "login",
+            "records": [],
+            "others": [],
+            "last_login": vault_lib.last_username(tid),
+        }
+        recs = bundle.get("records") or []
+        prev = ask_get(tid, host) if host else None
+        if not login_lib.should_ask(prev):
+            if prev == "pending":
+                ask_payload_set(tid, bundle)
+            hard = vis.get("gated") and gate_lib.is_hard(vis.get("reason"))
+            if hard and prev == "denied":
+                set_gate(tid, True, vis.get("reason"))
+            return
+        kind, rid = login_lib.next_login(False, None, recs)
+        if kind == "auto" and rid:
+            ask_set(tid, host, "approved")
+            actlog.add("login.auto", id=tid, host=host, record=rid, login=next((r.get("login") for r in recs if r.get("id") == rid), ""))
+            start_login(tid, rid)
+            sse_broadcast(
+                "login-auto",
+                {
+                    "id": tid,
+                    "host": host,
+                    "record": rid,
+                    "login": next((r.get("login") for r in recs if r.get("id") == rid), ""),
+                },
+            )
+            return
+        set_gate(tid, True, "login")
+        ask_set(tid, host, "pending")
+        ask_payload_set(tid, bundle)
+        sse_broadcast("login-ask", bundle)
+        actlog.add(
+            "login.ask",
+            id=tid,
+            host=host,
+            reason=vis.get("reason"),
+            n=len(recs),
+            others=len(bundle.get("others") or []),
+        )
+        return
+    hard = vis.get("gated") and gate_lib.is_hard(vis.get("reason"))
+    if not busy:
+        set_gate(tid, bool(hard), vis.get("reason") if hard else None)
+
+
+ACT_JS = """
+(() => {
+  const box = document.querySelector('#prompt-textarea, textarea, input[type=search], input[name=field-keywords], input[name=q]');
+  if (box && box.offsetParent !== null) {
+    box.focus();
+    return {ok:true, kind:'focus'};
+  }
+  const a = [...document.querySelectorAll('a[href]')].find(x => {
+    const r = x.getBoundingClientRect();
+    const t = (x.innerText||'').trim();
+    return r.width>48 && r.height>14 && r.y>90 && t.length>8;
+  });
+  if (!a) return {ok:false};
+  a.click();
+  return {ok:true, kind:'link', t: a.innerText.trim().slice(0,40)};
+})()
+"""
+
+CHATGPT_JS = """
+(async () => {
+  const box = document.querySelector('#prompt-textarea, [data-testid="prompt-textarea"], textarea, [contenteditable="true"]');
+  if (!box) return {ok:false, error:'no composer'};
+  box.focus();
+  const text = 'Reply with one word only: pong';
+  if ('value' in box) {
+    box.value = text;
+    box.dispatchEvent(new Event('input', {bubbles:true}));
+  } else {
+    box.textContent = text;
+    box.dispatchEvent(new InputEvent('input', {bubbles:true, data:text}));
+  }
+  await new Promise(r => setTimeout(r, 400));
+  const send = document.querySelector('#composer-submit-button, button[data-testid="send-button"], button[aria-label*="Send"]');
+  if (send && !send.disabled) send.click();
+  else box.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
+  return {ok:true, kind:'chatgpt', t:text};
+})()
+"""
+
+
+def work_loop(tid: str, url: str, stop: threading.Event) -> None:
+    try:
+        row = find_tenant(load_doc(), tid)
+        cdp = cdp_base(row)
+    except (Exception, SystemExit):
+        return
+    tabs_lib.set_work(tid, url)
+    acted = False
+    while not stop.is_set():
+        with _SSE_LOCK:
+            logging_in = tid in _LOGIN
+        if logging_in:
+            stop.wait(1)
+            continue
+        try:
+            tab = cdp_lib.find_tab(cdp, url) or cdp_lib.front_tab(cdp, url)
+        except Exception as e:
+            actlog.add("work.tab_fail", id=tid, error=str(e)[:160])
+            stop.wait(2)
+            continue
+        try:
+            hit = gate_lib.inspect_page(tab)
+        except Exception:
+            hit = {"gated": False}
+        if tab.get("ws"):
+            dismissed = login_lib.dismiss_prompts(tab["ws"])
+            if dismissed.get("ok"):
+                actlog.add("work.dismiss", id=tid, kind=dismissed.get("kind"), t=dismissed.get("t"))
+        if hit.get("reason") == "login":
+            emit_tabs(tid, cdp)
+            wait_until_ungated(tid, cdp, tab, 3600)
+            if stop.is_set():
+                break
+            continue
+        if hit.get("reason") in ("2fa", "sso"):
+            set_gate(tid, True, hit.get("reason"))
+            wait_until_ungated(tid, cdp, tab, 3600)
+            if stop.is_set():
+                break
+            continue
+        if hit.get("gated") and gate_lib.is_hard(hit.get("reason")):
+            set_gate(tid, True, hit.get("reason"))
+            wait_until_ungated(tid, cdp, tab, 3600)
+            if stop.is_set():
+                break
+            set_steer(tid, "surf", True)
+            continue
+        try:
+            cdp_lib.activate(cdp, tab["id"])
+            try:
+                cdp_lib.call(tab["ws"], "Page.bringToFront")
+            except Exception:
+                pass
+            set_steer(tid, "surf", True)
+            if tab.get("ws"):
+                if acted:
+                    actlog.add("work.hold", id=tid, url=url)
+                else:
+                    chatgpt = "chatgpt.com" in url
+                    r = cdp_lib.call(
+                        tab["ws"],
+                        "Runtime.evaluate",
+                        {
+                            "expression": CHATGPT_JS if chatgpt else ACT_JS,
+                            "returnByValue": True,
+                            "awaitPromise": chatgpt,
+                        },
+                    )
+                    val = (r or {}).get("result", {}).get("value")
+                    actlog.add("work.act", id=tid, url=url, result=val)
+                    acted = True
+        except Exception as e:
+            actlog.add("work.act_fail", id=tid, error=str(e)[:200])
+        emit_tabs(tid, cdp)
+        stop.wait(5)
+
+
+def start_work(tid: str, url: str) -> dict:
+    tabs_lib.set_work(tid, url)
+    with _SSE_LOCK:
+        prev = _WORK.get(tid)
+        if prev:
+            prev["stop"].set()
+        stop = threading.Event()
+        _WORK[tid] = {"url": url, "stop": stop}
+    threading.Thread(target=work_loop, args=(tid, url, stop), daemon=True, name=f"work-{tid}").start()
+    set_steer(tid, "surf", True)
+    return {"ok": True, "id": tid, "url": url, "work": True}
+
+
+def stop_work(tid: str) -> None:
+    with _SSE_LOCK:
+        prev = _WORK.get(tid)
+        if prev:
+            prev["stop"].set()
+            _WORK.pop(tid, None)
+
+
+def login_agent(tid: str, rid: str, stop: threading.Event) -> None:
+    cred = vault_lib.secret(tid, rid)
+    if not cred:
+        actlog.add("login.missing", id=tid, record=rid)
+        return
+    # Chosen username is remembered for the whole walk: username-only page,
+    # then password page, then 2FA wait. Never log the password.
+    user = cred.get("login") or ""
+    password = cred.get("password") or ""
+    actlog.add("login.agent.start", id=tid, host=cred.get("host"), login=user, record=rid)
+    try:
+        cdp = cdp_base(find_tenant(load_doc(), tid))
+    except (Exception, SystemExit) as e:
+        actlog.add("login.agent_fail", id=tid, error=str(e)[:160])
+        return
+    did_user = did_pass = False
+    last_user = last_pass = 0.0
+    waiting_2fa = False
+    try:
+        while not stop.is_set():
+            try:
+                vis = gate_lib.inspect_front(cdp)
+                if vis.get("reason") in ("captcha", "human", "cloudflare"):
+                    set_gate(tid, True, vis.get("reason"))
+                    wait_until_ungated(tid, cdp, None, 3600)
+                    continue
+                tab, _form = login_lib.find_login_page(cdp, prefer_host=cred.get("host"))
+                if not tab:
+                    plist = cdp_lib.pages(cdp)
+                    tab = next((p for p in plist if p.get("id") == vis.get("tab")), None) or (plist[0] if plist else None)
+                ws = tab.get("ws") if tab else None
+                if not ws:
+                    stop.wait(1)
+                    continue
+                login_lib.bring_login_front(cdp, tab)
+                dismissed = login_lib.dismiss_prompts(ws)
+                if dismissed.get("ok"):
+                    actlog.add("login.dismiss", id=tid, kind=dismissed.get("kind"), t=dismissed.get("t"))
+                now = time.time()
+                form = login_lib.inspect_form(ws)
+                step = form.get("step")
+                if step == "username" and did_user:
+                    stop.wait(0.6)
+                    continue
+                if step == "password" and did_pass:
+                    stop.wait(0.6)
+                    continue
+                r = login_lib.act(ws, user, password)
+                step = r.get("step")
+                action = r.get("action")
+                actlog.add(
+                    "login.step",
+                    id=tid,
+                    step=step,
+                    action=action,
+                    ok=r.get("ok"),
+                    login=user,
+                    remembered=(r.get("remembered") or "")[:80],
+                    href=(r.get("href") or "")[:100],
+                )
+                if action == "wait-sso":
+                    set_gate(tid, True, "sso")
+                    actlog.add("login.sso_wait", id=tid, login=user)
+                    wait_until_ungated(tid, cdp, tab, 3600)
+                    continue
+                if action == "wait-2fa":
+                    set_gate(tid, True, "2fa")
+                    if not waiting_2fa:
+                        waiting_2fa = True
+                        actlog.add("login.2fa_wait", id=tid, login=user)
+                    wait_until_ungated(tid, cdp, tab, 3600)
+                    actlog.add("login.2fa_cleared", id=tid)
+                    form = login_lib.inspect_form(ws)
+                    if form.get("step") != "2fa":
+                        host = vault_lib.page_host(form.get("href") or "") or cred.get("host") or ""
+                        if host:
+                            ask_set(tid, host, "approved")
+                        actlog.add("login.done", id=tid, login=user, via="2fa")
+                        set_gate(tid, False, None)
+                        set_steer(tid, "surf", True)
+                        break
+                    continue
+                if action == "username":
+                    if r.get("ok"):
+                        did_user = True
+                        last_user = now
+                    set_steer(tid, "login", True)
+                elif action == "password":
+                    if r.get("ok"):
+                        did_pass = True
+                        last_pass = now
+                    set_steer(tid, "login", True)
+                elif action == "none" and (did_pass or did_user):
+                    if vis.get("gated") and vis.get("reason") not in (None, "login"):
+                        stop.wait(1.2)
+                        continue
+                    host = vault_lib.page_host(r.get("href") or "") or cred.get("host") or ""
+                    if host:
+                        ask_set(tid, host, "approved")
+                    actlog.add("login.done", id=tid, login=user, via="form")
+                    set_gate(tid, False, None)
+                    set_steer(tid, "surf", True)
+                    break
+                # Already filled this step — wait for the page to move.
+                if action == "username" and did_user and now - last_user < 4:
+                    stop.wait(0.8)
+                    continue
+                if action == "password" and did_pass and now - last_pass < 4:
+                    stop.wait(0.8)
+                    continue
+            except Exception as e:
+                actlog.add("login.agent_fail", id=tid, error=str(e)[:160])
+            stop.wait(1.0)
+    finally:
+        with _SSE_LOCK:
+            cur = _LOGIN.get(tid)
+            if cur and cur.get("stop") is stop:
+                _LOGIN.pop(tid, None)
+
+
+def start_login(tid: str, rid: str) -> dict:
+    stop_work(tid)
+    vault_lib.touch(tid, rid)
+    recs = vault_lib.list_records(tid)
+    rec = next((r for r in recs if r.get("id") == rid), None) or {}
+    login = rec.get("login") or ""
+    host = rec.get("host") or ""
+    with _SSE_LOCK:
+        prev = _LOGIN.get(tid)
+        if prev:
+            prev["stop"].set()
+        stop = threading.Event()
+        _LOGIN[tid] = {"record": rid, "stop": stop, "login": login}
+        page_host = _LOGIN_HOST.get(tid) or ""
+    ask_payload_clear(tid)
+    mark = page_host or host
+    if mark:
+        ask_set(tid, mark, "approved")
+    threading.Thread(target=login_agent, args=(tid, rid, stop), daemon=True, name=f"login-{tid}").start()
+    set_steer(tid, "login", True)
+    actlog.add("login.approved", id=tid, record=rid, login=login)
+    return {"ok": True, "id": tid, "record": rid, "login": login, "agent": True, "remembered": login}
+
+
+def continue_human(tid: str) -> dict:
+    before = gate_view(tid)
+    work = tabs_lib.snapshot(tid)
+    with _SSE_LOCK:
+        live = dict(_WORK.get(tid) or {})
+    url = live.get("url") or work.get("work")
+    actlog.add(
+        "continue.click",
+        id=tid,
+        gate_before=before,
+        work_url=url,
+        front=(work.get("front")),
+        tabs=[t.get("host") for t in (work.get("tabs") or [])],
+        worker=bool(live),
+    )
+    snap = set_gate(tid, False, None)
+    sse_broadcast("continue", {"id": tid})
+    err = None
+    with _SSE_LOCK:
+        logging_in = tid in _LOGIN
+    if logging_in:
+        actlog.add("continue.login_wait", id=tid)
+        return {"ok": True, "id": tid, "gate": snap, "url": url, "error": None, "login": True}
+    if url:
+        try:
+            row = find_tenant(load_doc(), tid)
+            tab = cdp_lib.front_tab(cdp_base(row), url)
+            actlog.add("continue.front", id=tid, url=tab.get("url"), title=tab.get("title"))
+        except (Exception, SystemExit) as e:
+            err = str(e)[:200]
+            actlog.add("continue.front_fail", id=tid, error=err)
+        set_steer(tid, "surf", True)
+    else:
+        actlog.add("continue.no_work", id=tid)
+        err = "no work url"
+    out = {"ok": err is None, "id": tid, "gate": snap, "url": url, "error": err}
+    actlog.add("continue.done", **{k: v for k, v in out.items() if k != "gate"}, gated=snap.get("gated"))
+    return out
+
+
+def watch_jar(tid: str, cdp: str) -> None:
+    try:
+        emit_tabs(tid, cdp)
+    except Exception:
+        pass
+
+    def on_change(_method, _params):
+        emit_tabs(tid, cdp)
+
+    watch_lib.watch_forever(cdp, on_change)
+
+
+def start_watchers() -> None:
+    if os.environ.get("PRIMS_BROWSERS_NO_WATCH"):
+        return
+    try:
+        rows = tenants(load_doc())
+    except Exception:
+        return
+    for row in rows:
+        glass = row.get("glass") or {}
+        if not glass.get("cdp"):
+            continue
+        chrome_prefs.quiet_profile(Path.home() / ".prim/prims-browsers/jars" / row["id"] / "chromium")
+        threading.Thread(
+            target=watch_jar,
+            args=(row["id"], glass["cdp"].rstrip("/")),
+            daemon=True,
+            name=f"watch-{row['id']}",
+        ).start()
+        if os.environ.get("PRIMS_BROWSERS_AUTOWORK"):
+            url = WORK_URLS.get(row["id"])
+            if url:
+                start_work(row["id"], url)
+
+
+def set_steer(tid: str | None, verb: str | None, on: bool) -> dict:
+    if not tid:
+        return {"id": None, "on": False, "hold": STEER_HOLD}
+    host = ""
+    try:
+        host = front_host(cdp_base(find_tenant(load_doc(), tid)))
+    except (Exception, SystemExit):
+        host = ""
+    with _SSE_LOCK:
+        if on:
+            _STEERS[tid] = {"id": tid, "verb": verb, "on": True, "last_touch": time.time(), "host": host}
+        else:
+            _STEERS[tid] = {"id": tid, "verb": verb, "on": False, "last_touch": None, "host": host}
+    snap = steer_view(tid)
+    snap["host"] = host
+    sse_broadcast("steer", snap)
+    return snap
+
+
+def announce_steer(tid: str, verb: str, on: bool) -> None:
+    payload = json.dumps({"id": tid, "verb": verb, "on": on}).encode()
+    req = urllib.request.Request(
+        f"http://{DESK_HOST}:{DESK_PORT}/api/steering",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=0.5)
+    except Exception:
+        set_steer(tid, verb, on)
+
+
+@contextmanager
+def steering(tid: str, verb: str):
+    announce_steer(tid, verb, True)
+    try:
+        yield
+    finally:
+        pass
+
+
+def pointer_of(row: dict) -> dict | None:
+    container = (row.get("glass") or {}).get("container")
+    if not container:
+        return None
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", "-e", "DISPLAY=:0", container, "xdotool", "getmouselocation", "--shell"],
+            capture_output=True,
+            text=True,
+            timeout=1.2,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    vals: dict[str, str] = {}
+    for line in (proc.stdout or "").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            vals[k] = v
+    try:
+        return {"x": int(vals.get("X") or 0), "y": int(vals.get("Y") or 0)}
+    except ValueError:
+        return None
+
+
+def chrome_snapshot(row: dict) -> dict:
+    glass = row.get("glass") or {}
+    cdp = glass.get("cdp")
+    steer = steer_view(row["id"])
+    gate = gate_view(row["id"])
+    base = {
+        "id": row["id"],
+        "label": row.get("label") or row["id"],
+        "tabs": [],
+        "active": None,
+        "url": "",
+        "title": "",
+        "canBack": False,
+        "canForward": False,
+        "steering": steer,
+        "gate": gate,
+        "host": steer.get("host") or "",
+        "mouse": pointer_of(row),
+    }
+    ask = ask_payload_get(row["id"])
+    if ask:
+        base["loginAsk"] = ask
+    if not cdp:
+        base["error"] = "no cdp"
+        return base
+    try:
+        plist = cdp_lib.pages(cdp)
+    except Exception as e:
+        base["error"] = str(e) or type(e).__name__
+        return base
+    vis = gate_lib.inspect_front(cdp) if plist else {}
+    front_id = vis.get("tab") or (plist[0]["id"] if plist else None)
+    gated_ids = {vis["tab"]} if vis.get("gated") and vis.get("tab") else set()
+    ledger = tabs_lib.record(row["id"], plist, front_id, gated_ids)
+    base["tabs"] = ledger.get("tabs") or [{"id": p["id"], "title": p["title"], "url": p["url"]} for p in plist]
+    base["active"] = ledger.get("front")
+    base["work"] = ledger.get("work")
+    front_row = next((t for t in base["tabs"] if t.get("id") == base["active"] or t.get("front")), None)
+    if front_row:
+        base["url"] = front_row.get("url") or ""
+        base["title"] = front_row.get("title") or ""
+        base["host"] = front_row.get("host") or base.get("host") or ""
+    if not plist:
+        return base
+    ws = None
+    for p in plist:
+        if p.get("id") == base["active"]:
+            ws = p.get("ws")
+            break
+    if not ws:
+        return base
+    try:
+        hist = cdp_lib.history(ws)
+    except Exception as e:
+        base["error"] = str(e) or type(e).__name__
+        return base
+    idx = hist.get("currentIndex")
+    entries = hist.get("entries") or []
+    base["canBack"] = isinstance(idx, int) and idx > 0
+    base["canForward"] = isinstance(idx, int) and idx < len(entries) - 1
+    return base
+
+
+def chrome_action(row: dict, action: str, url: str | None = None, tab: str | None = None) -> dict:
+    if action == "takeover":
+        set_steer(row["id"], "takeover", False)
+        return {"ok": True, "action": "takeover", "id": row["id"]}
+    cdp = cdp_base(row)
+    if action == "activate":
+        if not tab:
+            raise RuntimeError("tab required")
+        with steering(row["id"], "tab"):
+            cdp_lib.activate(cdp, tab)
+            page, ws = cdp_lib.first_page_ws(cdp, tab)
+            try:
+                cdp_lib.call(ws, "Page.bringToFront")
+            except Exception:
+                pass
+        return {"ok": True, "action": "activate", "tab": tab}
+    page, ws = cdp_lib.first_page_ws(cdp, tab)
+    if action == "nav":
+        if not url:
+            raise RuntimeError("url required")
+        with steering(row["id"], "nav"):
+            cdp_lib.navigate(ws, url)
+            try:
+                cdp_lib.call(ws, "Page.bringToFront")
+            except Exception:
+                pass
+        return {"ok": True, "action": "nav", "url": url, "from": page.get("url")}
+    if action == "back":
+        with steering(row["id"], "back"):
+            result = cdp_lib.history_go(ws, -1)
+        return {"ok": bool(result.get("ok")), "action": "back", **result}
+    if action == "forward":
+        with steering(row["id"], "forward"):
+            result = cdp_lib.history_go(ws, 1)
+        return {"ok": bool(result.get("ok")), "action": "forward", **result}
+    raise RuntimeError(f"unknown action {action}")
+
+
+def jar_fullscreen(container: str | None) -> tuple[bool, str]:
+    if not container:
+        return False, "no container"
+    try:
+        out = subprocess.check_output(
+            [
+                "docker", "exec", "-e", "DISPLAY=:0", container, "sh", "-c",
+                'id=$(xdotool search --onlyvisible --class Chromium 2>/dev/null | tail -1); '
+                '[ -n "$id" ] || { echo none; exit 0; }; xprop -id "$id" _NET_WM_STATE',
+            ],
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=8,
+        )
+    except Exception as e:
+        return False, str(e)[:80]
+    if "FULLSCREEN" in out:
+        return True, "fullscreen"
+    if "none" in out.splitlines()[:1]:
+        return False, "no window"
+    return False, "chrome-ok"
+
+
 class DeskHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
@@ -229,23 +1122,229 @@ class DeskHandler(SimpleHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def do_GET(self) -> None:
-        if self.path.startswith("/brand/"):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+        if path.startswith("/brand/"):
             return self._send_brand()
-        if self.path in ("/", "/index.html"):
+        if path in ("/", "/index.html"):
             return self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
-        if self.path in ("/desk.css",):
+        if path in ("/desk.css",):
             return self._send_file(WEB_DIR / "desk.css", "text/css; charset=utf-8")
-        if self.path in ("/desk.js",):
+        if path in ("/desk.js",):
             return self._send_file(WEB_DIR / "desk.js", "text/javascript; charset=utf-8")
-        if self.path in ("/health", "/health/"):
-            return self._send_json({"ok": True, "product": "prims-browsers", "url": DESK_URL})
-        if self.path in ("/tenants.json",):
+        if path.startswith("/fixture/"):
+            rel = path[len("/fixture/") :].split("?", 1)[0].lstrip("/")
+            if not rel:
+                rel = "login.html"
+            if rel in ("login", "login/"):
+                rel = "login.html"
+            if ".." in rel.split("/"):
+                return self.send_error(404, "not a fixture path")
+            target = (WEB_DIR / "fixture" / rel).resolve()
+            root = (WEB_DIR / "fixture").resolve()
+            if root not in target.parents and target != root:
+                return self.send_error(404, "not a fixture path")
+            if not target.is_file():
+                return self.send_error(404, "not a fixture path")
+            ext = target.suffix.lower()
+            types = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
+            return self._send_file(target, types.get(ext, "application/octet-stream"))
+        if path in ("/health", "/health/"):
+            return self._send_json(
+                {
+                    "ok": True,
+                    "product": "prims-browsers",
+                    "url": DESK_URL,
+                    "pid": os.getpid(),
+                    "revision": source_mtime(),
+                    "port": DESK_PORT,
+                }
+            )
+        if path in ("/tenants.json",):
             return self._send_file(TENANTS_PATH, "application/json")
-        if self.path in ("/api/status",):
+        if path in ("/api/vault", "/api/vault/"):
+            tid = (query.get("id") or [None])[0]
+            if not tid:
+                return self._send_json({"error": "id required"}, 400)
+            return self._send_json({"id": tid, "records": vault_lib.list_records(tid)})
+        if path in ("/api/vault/secret", "/api/vault/secret/"):
+            tid = (query.get("id") or [None])[0]
+            rid = (query.get("record") or [None])[0]
+            if not tid or not rid:
+                return self._send_json({"error": "id and record required"}, 400)
+            cred = vault_lib.secret(tid, rid)
+            if not cred:
+                return self._send_json({"error": "not found"}, 404)
+            actlog.add("vault.reveal", id=tid, record=rid, host=cred.get("host"), login=cred.get("login"))
+            return self._send_json(
+                {
+                    "id": tid,
+                    "record": cred.get("id"),
+                    "host": cred.get("host"),
+                    "login": cred.get("login"),
+                    "password": cred.get("password") or "",
+                }
+            )
+        if path in ("/api/status",):
             doc = load_doc()
             reports = [glass_status(r) for r in tenants(doc)]
             return self._send_json({"source": doc.get("source") or "mock", "later": doc.get("later"), "tenants": reports})
+        if path in ("/api/chrome", "/api/chrome/"):
+            tid = (query.get("id") or [None])[0]
+            if not tid:
+                return self._send_json({"error": "id required"}, 400)
+            try:
+                row = find_tenant(load_doc(), tid)
+            except SystemExit as e:
+                return self._send_json({"error": str(e)}, 404)
+            return self._send_json(chrome_snapshot(row))
+        if path in ("/api/pointer", "/api/pointer/"):
+            tid = (query.get("id") or [None])[0]
+            if not tid:
+                return self._send_json({"error": "id required"}, 400)
+            try:
+                row = find_tenant(load_doc(), tid)
+            except SystemExit as e:
+                return self._send_json({"error": str(e)}, 404)
+            return self._send_json({"id": tid, "mouse": pointer_of(row), "steering": steer_view(tid)})
+        if path in ("/api/events",):
+            return self._sse()
         self.send_error(404, "not a desk path")
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(n) if n else b"{}"
+        try:
+            data = json.loads(raw.decode() or "{}")
+        except Exception:
+            data = {}
+        if path in ("/api/test/event", "/api/test/event/"):
+            if not os.environ.get("PRIMS_BROWSERS_TEST"):
+                return self._send_json({"error": "test hooks off"}, 404)
+            ev = data.get("event") or "login-ask"
+            payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+            if ev == "login-ask" and payload.get("id"):
+                tid = payload["id"]
+                host = payload.get("host") or ""
+                bundle = vault_lib.ask_bundle(tid, host, payload.get("href") or "")
+                if "records" in payload:
+                    bundle["records"] = payload["records"]
+                if "others" in payload:
+                    bundle["others"] = payload["others"]
+                if "last_login" in payload:
+                    bundle["last_login"] = payload["last_login"]
+                if host:
+                    ask_set(tid, host, "pending")
+                ask_payload_set(tid, bundle)
+                payload = bundle
+            if ev == "login-auto" and payload.get("id"):
+                ask_payload_clear(payload["id"])
+            sse_broadcast(ev, payload)
+            actlog.add("test.event", event=ev, id=payload.get("id"))
+            return self._send_json({"ok": True, "event": ev})
+        if path in ("/api/steering", "/api/steering/"):
+            snap = set_steer(data.get("id"), data.get("verb"), bool(data.get("on")))
+            return self._send_json({"ok": True, **snap})
+        if path in ("/api/gate", "/api/gate/"):
+            snap = set_gate(data.get("id") or "", bool(data.get("gated")), data.get("reason"))
+            return self._send_json({"ok": True, **snap})
+        if path in ("/api/log", "/api/log/"):
+            actlog.add("ui." + str(data.get("kind") or "event"), **{k: data[k] for k in data if k != "kind"})
+            return self._send_json({"ok": True})
+        if path in ("/api/continue", "/api/continue/"):
+            tid = data.get("id")
+            if not tid:
+                return self._send_json({"error": "id required"}, 400)
+            return self._send_json(continue_human(tid))
+        if path in ("/api/vault", "/api/vault/"):
+            tid = data.get("id")
+            if not tid:
+                return self._send_json({"error": "id required"}, 400)
+            if data.get("remove"):
+                ok = vault_lib.remove(tid, data.get("record") or "")
+                actlog.add("vault.remove", id=tid, record=data.get("record"), ok=ok)
+                return self._send_json({"ok": ok, "id": tid, "records": vault_lib.list_records(tid)})
+            try:
+                row = vault_lib.add(tid, data.get("host") or "", data.get("login") or "", data.get("password") or "")
+            except ValueError as e:
+                return self._send_json({"error": str(e)}, 400)
+            actlog.add("vault.add", id=tid, host=row.get("host"), login=row.get("login"), record=row.get("id"))
+            return self._send_json({"ok": True, "record": row, "records": vault_lib.list_records(tid)})
+        if path in ("/api/login-approve", "/api/login-approve/"):
+            tid = data.get("id")
+            rid = data.get("record")
+            if not tid or not rid:
+                return self._send_json({"error": "id and record required"}, 400)
+            return self._send_json(start_login(tid, rid))
+        if path in ("/api/login-deny", "/api/login-deny/"):
+            tid = data.get("id")
+            with _SSE_LOCK:
+                prev = _LOGIN.pop(tid, None) if tid else None
+                host = _LOGIN_HOST.get(tid) if tid else None
+            if prev:
+                prev["stop"].set()
+            if tid:
+                ask_payload_clear(tid)
+            if tid and host:
+                ask_set(tid, host, "denied")
+            actlog.add("login.denied", id=tid, host=host)
+            return self._send_json({"ok": True, "id": tid})
+        if path in ("/api/work", "/api/work/"):
+            tid = data.get("id")
+            url = data.get("url") or WORK_URLS.get(tid)
+            if not tid or not url:
+                return self._send_json({"error": "id and url required"}, 400)
+            if data.get("on") is False:
+                stop_work(tid)
+                return self._send_json({"ok": True, "id": tid, "work": False})
+            return self._send_json(start_work(tid, url))
+        if path in ("/api/chrome", "/api/chrome/"):
+            tid = data.get("id")
+            action = data.get("action")
+            if not tid or not action:
+                return self._send_json({"error": "id and action required"}, 400)
+            try:
+                row = find_tenant(load_doc(), tid)
+                result = chrome_action(row, action, url=data.get("url"), tab=data.get("tab"))
+            except SystemExit as e:
+                return self._send_json({"error": str(e)}, 404)
+            except Exception as e:
+                return self._send_json({"error": str(e) or type(e).__name__, "action": action}, 500)
+            return self._send_json(result)
+        self.send_error(404, "not a desk path")
+
+    def _sse(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        q: queue.Queue = queue.Queue()
+        with _SSE_LOCK:
+            _SSE.append(q)
+        try:
+            self.wfile.write(b"event: hello\ndata: {}\n\n")
+            self.wfile.write(f"event: steers\ndata: {json.dumps(steer_list())}\n\n".encode())
+            with _SSE_LOCK:
+                gids = list(_GATES.keys())
+            gates = [g for tid in gids if (g := gate_view(tid)).get("gated")]
+            self.wfile.write(f"event: gates\ndata: {json.dumps(gates)}\n\n".encode())
+            for ask in pending_asks():
+                self.wfile.write(f"event: login-ask\ndata: {json.dumps(ask)}\n\n".encode())
+            self.wfile.flush()
+            while True:
+                blob = q.get()
+                self.wfile.write(blob)
+                self.wfile.flush()
+        except Exception:
+            pass
+        finally:
+            with _SSE_LOCK:
+                if q in _SSE:
+                    _SSE.remove(q)
 
     def _send_brand(self) -> None:
         rel = self.path[len("/brand/") :].split("?", 1)[0].lstrip("/")
@@ -281,9 +1380,9 @@ class DeskHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_json(self, payload: dict) -> None:
+    def _send_json(self, payload: dict, status: int = 200) -> None:
         data = json.dumps(payload).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -294,23 +1393,31 @@ class DeskHandler(SimpleHTTPRequestHandler):
 def cmd_serve(json_mode: bool) -> int:
     httpd = ThreadingHTTPServer((DESK_HOST, DESK_PORT), DeskHandler)
     PID_PATH.write_text(str(os.getpid()))
-    payload = {"ok": True, "url": DESK_URL, "pid": os.getpid()}
+    STAMP_PATH.write_text(str(source_mtime()))
+    payload = {"ok": True, "url": DESK_URL, "pid": os.getpid(), "revision": source_mtime()}
     if json_mode:
         sys.stdout.write(json.dumps(payload) + "\n")
         sys.stdout.flush()
     else:
         sys.stdout.write(f"desk {DESK_URL}\n")
         sys.stdout.flush()
+    start_watchers()
     try:
         httpd.serve_forever()
     finally:
         if PID_PATH.exists() and PID_PATH.read_text().strip() == str(os.getpid()):
             PID_PATH.unlink(missing_ok=True)
+        STAMP_PATH.unlink(missing_ok=True)
     return 0
 
 
 def ensure_desk() -> tuple[bool, str]:
     ok, detail = desk_health()
+    if ok and desk_stale():
+        actlog.add("desk.stale_restart", detail=detail)
+        kill_desk()
+        ok = False
+        detail = "stale"
     if ok:
         return True, "already up"
     log = ROOT / ".desk.log"
@@ -366,7 +1473,8 @@ def cmd_tabs(doc: dict, rest: list[str], json_mode: bool) -> int:
         return emit({"error": "tabs needs a tenant id"}, json_mode, "tabs needs a tenant id", 2)
     row = find_tenant(doc, rest[0])
     try:
-        plist = cdp_lib.pages(cdp_base(row))
+        with steering(row["id"], "tabs"):
+            plist = cdp_lib.pages(cdp_base(row))
     except Exception as e:
         err = str(e) or type(e).__name__
         return emit({"error": err, "via": "cdp"}, json_mode, f"cdp failed: {err}", 1)
@@ -389,8 +1497,9 @@ def cmd_screenshot(doc: dict, rest: list[str], json_mode: bool) -> int:
             continue
         i += 1
     try:
-        page, ws = cdp_lib.first_page_ws(cdp_base(row))
-        result = cdp_lib.call(ws, "Page.captureScreenshot", {"format": "png"})
+        with steering(row["id"], "screenshot"):
+            page, ws = cdp_lib.first_page_ws(cdp_base(row))
+            result = cdp_lib.call(ws, "Page.captureScreenshot", {"format": "png"})
     except Exception as e:
         err = str(e) or type(e).__name__
         return emit({"error": err, "via": "cdp"}, json_mode, f"cdp failed: {err}", 1)
@@ -401,6 +1510,22 @@ def cmd_screenshot(doc: dict, rest: list[str], json_mode: bool) -> int:
     Path(out).write_bytes(base64.b64decode(data))
     payload = {"ok": True, "via": "cdp", "path": out, "url": page.get("url"), "tab": page.get("id")}
     return emit(payload, json_mode, f"{out}  {page.get('url')}")
+
+
+def cmd_nav(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if len(rest) < 2:
+        return emit({"error": "nav <id> <url>"}, json_mode, "nav <id> <url>", 2)
+    row = find_tenant(doc, rest[0])
+    url = rest[1]
+    try:
+        with steering(row["id"], "nav"):
+            page, ws = cdp_lib.first_page_ws(cdp_base(row))
+            cdp_lib.navigate(ws, url)
+    except Exception as e:
+        err = str(e) or type(e).__name__
+        return emit({"error": err, "via": "cdp"}, json_mode, f"cdp failed: {err}", 1)
+    payload = {"ok": True, "via": "cdp", "from": page.get("url"), "to": url}
+    return emit(payload, json_mode, f"nav {url} via=cdp")
 
 
 def cmd_click(doc: dict, rest: list[str], json_mode: bool) -> int:
@@ -414,9 +1539,10 @@ def cmd_click(doc: dict, rest: list[str], json_mode: bool) -> int:
         + "); if (!el) return {ok:false, error:'not found'}; el.click(); return {ok:true, tag: el.tagName}; })()"
     )
     try:
-        _page, ws = cdp_lib.first_page_ws(cdp_base(row))
-        result = cdp_lib.call(ws, "Runtime.evaluate", {"expression": expr, "returnByValue": True})
-        val = (result or {}).get("result", {}).get("value") or {}
+        with steering(row["id"], "click"):
+            _page, ws = cdp_lib.first_page_ws(cdp_base(row))
+            result = cdp_lib.call(ws, "Runtime.evaluate", {"expression": expr, "returnByValue": True})
+            val = (result or {}).get("result", {}).get("value") or {}
     except Exception as e:
         return emit({"error": str(e), "via": "cdp", "hint": "vnc-click"}, json_mode, f"cdp failed: {e} (try vnc-click)", 1)
     ok = bool(val.get("ok"))
@@ -439,9 +1565,10 @@ def cmd_type(doc: dict, rest: list[str], json_mode: bool) -> int:
         + " return {ok:true}; })()"
     )
     try:
-        _page, ws = cdp_lib.first_page_ws(cdp_base(row))
-        result = cdp_lib.call(ws, "Runtime.evaluate", {"expression": expr, "returnByValue": True})
-        val = (result or {}).get("result", {}).get("value") or {}
+        with steering(row["id"], "type"):
+            _page, ws = cdp_lib.first_page_ws(cdp_base(row))
+            result = cdp_lib.call(ws, "Runtime.evaluate", {"expression": expr, "returnByValue": True})
+            val = (result or {}).get("result", {}).get("value") or {}
     except Exception as e:
         return emit({"error": str(e), "via": "cdp", "hint": "vnc-type"}, json_mode, f"cdp failed: {e} (try vnc-type)", 1)
     ok = bool(val.get("ok"))
@@ -455,7 +1582,8 @@ def cmd_vnc_key(doc: dict, rest: list[str], json_mode: bool) -> int:
     row = find_tenant(doc, rest[0])
     key = rest[1]
     container = vnc_container(row)
-    proc = docker_exec(container, ["xdotool", "key", key], check=False)
+    with steering(row["id"], "key"):
+        proc = docker_exec(container, ["xdotool", "key", key], check=False)
     payload = {"ok": proc.returncode == 0, "via": "vnc", "key": key, "stderr": (proc.stderr or "").strip()[:200]}
     return emit(payload, json_mode, f"vnc-key {key} via={payload['via']} ok={payload['ok']}", 0 if payload["ok"] else 1)
 
@@ -466,9 +1594,73 @@ def cmd_vnc_type(doc: dict, rest: list[str], json_mode: bool) -> int:
     row = find_tenant(doc, rest[0])
     text = " ".join(rest[1:])
     container = vnc_container(row)
-    proc = docker_exec(container, ["xdotool", "type", "--clearmodifiers", text], check=False)
+    with steering(row["id"], "type"):
+        proc = docker_exec(container, ["xdotool", "type", "--clearmodifiers", text], check=False)
     payload = {"ok": proc.returncode == 0, "via": "vnc", "n": len(text), "stderr": (proc.stderr or "").strip()[:200]}
     return emit(payload, json_mode, f"vnc-type n={len(text)} ok={payload['ok']}", 0 if payload["ok"] else 1)
+
+
+def cmd_vnc_move(doc: dict, rest: list[str], json_mode: bool) -> int:
+    if len(rest) < 3:
+        return emit({"error": "vnc-move <id> <x> <y>"}, json_mode, "vnc-move <id> <x> <y>", 2)
+    row = find_tenant(doc, rest[0])
+    x, y = rest[1], rest[2]
+    container = vnc_container(row)
+    with steering(row["id"], "move"):
+        proc = docker_exec(container, ["xdotool", "mousemove", "--sync", x, y], check=False)
+    payload = {"ok": proc.returncode == 0, "via": "vnc", "x": x, "y": y, "stderr": (proc.stderr or "").strip()[:200]}
+    return emit(payload, json_mode, f"vnc-move {x},{y} ok={payload['ok']}", 0 if payload["ok"] else 1)
+
+
+def _record_flags(rest: list[str]) -> tuple[list[str], dict]:
+    out = None
+    fps = 10
+    pos = []
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--out" and i + 1 < len(rest):
+            out = rest[i + 1]
+            i += 2
+            continue
+        if rest[i] == "--fps" and i + 1 < len(rest):
+            fps = int(rest[i + 1])
+            i += 2
+            continue
+        pos.append(rest[i])
+        i += 1
+    return pos, {"out": out, "fps": fps}
+
+
+def cmd_record(doc: dict, rest: list[str], json_mode: bool) -> int:
+    pos, flags = _record_flags(rest)
+    if len(pos) < 2:
+        return emit(
+            {"error": "record <id> start|stop|status"},
+            json_mode,
+            "record <id> start|stop|status",
+            2,
+        )
+    tid, action = pos[0], pos[1]
+    row = find_tenant(doc, tid)
+    container = vnc_container(row)
+    try:
+        with steering(tid, "record"):
+            if action == "start":
+                dest = flags["out"] or str(
+                    record_lib.state_dir() / f"{tid}-{int(time.time())}.mp4"
+                )
+                payload = record_lib.start(tid, container, dest, fps=flags["fps"])
+                return emit(payload, json_mode, f"record start {tid} pid={payload['pid']} out={payload['out']}")
+            if action == "stop":
+                payload = record_lib.stop(tid, container)
+                return emit(payload, json_mode, f"record stop {tid} {payload['out']} bytes={payload['bytes']}")
+            if action == "status":
+                payload = record_lib.status(tid, container)
+                rec = "recording" if payload.get("recording") else "idle"
+                return emit(payload, json_mode, f"record {tid} {rec}")
+    except Exception as e:
+        return emit({"error": str(e), "id": tid, "action": action}, json_mode, str(e), 1)
+    return emit({"error": f"unknown record action {action}"}, json_mode, f"record <id> start|stop|status", 2)
 
 
 def cmd_vnc_click(doc: dict, rest: list[str], json_mode: bool) -> int:
@@ -477,9 +1669,19 @@ def cmd_vnc_click(doc: dict, rest: list[str], json_mode: bool) -> int:
     row = find_tenant(doc, rest[0])
     x, y = rest[1], rest[2]
     container = vnc_container(row)
-    proc = docker_exec(container, ["xdotool", "mousemove", x, y, "click", "1"], check=False)
+    with steering(row["id"], "click"):
+        proc = docker_exec(container, ["xdotool", "mousemove", "--sync", x, y, "click", "1"], check=False)
     payload = {"ok": proc.returncode == 0, "via": "vnc", "x": x, "y": y, "stderr": (proc.stderr or "").strip()[:200]}
     return emit(payload, json_mode, f"vnc-click {x},{y} ok={payload['ok']}", 0 if payload["ok"] else 1)
+
+
+def cmd_test(json_mode: bool) -> int:
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(ROOT / "tests"), "-q", "--tb=short"],
+        cwd=str(ROOT),
+    )
+    ok = proc.returncode == 0
+    return emit({"ok": ok, "code": proc.returncode}, json_mode, "tests ok" if ok else "tests failed", 0 if ok else 1)
 
 
 def cmd_doctor(doc: dict, json_mode: bool) -> int:
@@ -493,8 +1695,13 @@ def cmd_doctor(doc: dict, json_mode: bool) -> int:
         findings.append(f"tenant ids {ids} != {expected}")
     if (doc.get("source") or "") != "mock":
         findings.append("source should stay mock until prims-desktop tenants exists")
-    if not live:
-        findings.append("no live glass (expected gmw on the sample jar)")
+    if len(live) < 5:
+        findings.append(f"live glass {len(live)}/5")
+    for r in live:
+        container = ((r.get("glass") or {}).get("container"))
+        fs, fs_detail = jar_fullscreen(container)
+        if fs:
+            findings.append(f"{r['id']} chromium is fullscreen ({fs_detail}) — tabs/url hidden")
     cdp_ok = False
     cdp_detail = "no live cdp"
     if live:
@@ -540,6 +1747,8 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(USAGE)
         return 0
     cmd, rest = pos[0], pos[1:]
+    if cmd == "test":
+        return cmd_test(json_mode)
     doc = load_doc()
     if cmd in ("tenants", "list"):
         return cmd_tenants(doc, json_mode)
@@ -557,6 +1766,8 @@ def main(argv: list[str]) -> int:
         return cmd_tabs(doc, rest, json_mode)
     if cmd == "screenshot":
         return cmd_screenshot(doc, rest, json_mode)
+    if cmd == "nav":
+        return cmd_nav(doc, rest, json_mode)
     if cmd == "click":
         return cmd_click(doc, rest, json_mode)
     if cmd == "type":
@@ -565,8 +1776,12 @@ def main(argv: list[str]) -> int:
         return cmd_vnc_key(doc, rest, json_mode)
     if cmd == "vnc-type":
         return cmd_vnc_type(doc, rest, json_mode)
+    if cmd == "vnc-move":
+        return cmd_vnc_move(doc, rest, json_mode)
     if cmd == "vnc-click":
         return cmd_vnc_click(doc, rest, json_mode)
+    if cmd == "record":
+        return cmd_record(doc, rest, json_mode)
     if cmd == "doctor":
         return cmd_doctor(doc, json_mode)
     return emit({"error": f"unknown command {cmd}"}, json_mode, f"unknown command {cmd}\n{USAGE}", 1)
