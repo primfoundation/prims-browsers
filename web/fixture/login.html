@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Prims</title>
+  <style>
+    :root { color-scheme: light; --bg:#f4f3ef; --ink:#0c0c0e; --soft:#5c5a54; --line:#d9d6cc; --gold:#e8c547; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      background: var(--bg);
+      color: var(--ink);
+      display: grid;
+      place-items: center;
+    }
+    main {
+      width: min(22rem, calc(100% - 2.4rem));
+    }
+    .mark {
+      font-size: 0.72rem;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--soft);
+      margin: 0 0 1.4rem;
+    }
+    h1 { font-size: 1.85rem; font-weight: 500; letter-spacing: -0.03em; margin: 0 0 0.35rem; }
+    .lede { color: var(--soft); margin: 0 0 1.4rem; line-height: 1.45; }
+    [data-remembered] { font-family: ui-monospace, Menlo, monospace; font-size: 0.88rem; }
+    label { display: block; font-size: 0.8rem; margin: 0 0 0.35rem; }
+    input {
+      width: 100%;
+      height: 2.5rem;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 0 0.8rem;
+      font: inherit;
+      background: #fff;
+      color: var(--ink);
+    }
+    button {
+      margin-top: 0.9rem;
+      width: 100%;
+      height: 2.6rem;
+      border: 0;
+      border-radius: 999px;
+      background: var(--gold);
+      color: #0c0c0e;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ghost {
+      background: transparent;
+      border: 1px solid var(--line);
+      margin-top: 0.55rem;
+    }
+    .ok { font-size: 1.1rem; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="mark">Prims</p>
+    <section id="step-user">
+      <h1>Sign in</h1>
+      <p class="lede">Email or username. Next page is the password.</p>
+      <label for="user">Email or username</label>
+      <input id="user" name="username" type="email" autocomplete="username" placeholder="you@example.com">
+      <button type="button" id="go-user">Continue</button>
+    </section>
+    <section id="step-pass" hidden>
+      <h1>Welcome back</h1>
+      <p class="lede">Signing in as <span data-remembered></span></p>
+      <label for="pass">Password</label>
+      <input id="pass" name="password" type="password" autocomplete="current-password">
+      <button type="button" id="go-pass">Sign in</button>
+    </section>
+    <section id="step-2fa" hidden>
+      <h1>Check your device</h1>
+      <p class="lede">Enter the code for <span data-remembered></span>. I’ll wait.</p>
+      <label for="otp">Verification code</label>
+      <input id="otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8">
+      <button type="button" id="go-otp" class="ghost">Confirm code</button>
+    </section>
+    <section id="step-ok" hidden>
+      <h1>You’re in</h1>
+      <p class="lede ok">Signed in as <span data-remembered></span></p>
+    </section>
+  </main>
+  <script>
+    let remembered = "";
+    const show = (id) => {
+      ["user","pass","2fa","ok"].forEach((s) => {
+        document.getElementById("step-" + s).hidden = s !== id;
+      });
+      document.querySelectorAll("[data-remembered]").forEach((n) => { n.textContent = remembered; });
+    };
+    document.getElementById("go-user").addEventListener("click", () => {
+      remembered = (document.getElementById("user").value || "").trim();
+      if (!remembered) return;
+      show("pass");
+      document.getElementById("pass").focus();
+    });
+    document.getElementById("go-pass").addEventListener("click", () => {
+      const p = document.getElementById("pass").value || "";
+      if (!p) return;
+      show("2fa");
+      document.getElementById("otp").focus();
+    });
+    document.getElementById("go-otp").addEventListener("click", () => {
+      const c = (document.getElementById("otp").value || "").trim();
+      if (c.length < 4) return;
+      show("ok");
+    });
+    document.getElementById("user").addEventListener("keydown", (e) => { if (e.key === "Enter") document.getElementById("go-user").click(); });
+    document.getElementById("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") document.getElementById("go-pass").click(); });
+    document.getElementById("otp").addEventListener("keydown", (e) => { if (e.key === "Enter") document.getElementById("go-otp").click(); });
+  </script>
+</body>
+</html>

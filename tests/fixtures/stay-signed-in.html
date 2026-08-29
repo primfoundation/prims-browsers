@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Stay?</title></head>
+<body>
+  <p>Stay signed in?</p>
+  <button type="button" id="notnow">Not now</button>
+  <button type="button" id="yes">Yes</button>
+  <script>
+    window.__clicked = [];
+    document.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => { window.__clicked.push(b.id); });
+    });
+  </script>
+</body>
+</html>

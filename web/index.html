@@ -1,37 +1,125 @@
 <!DOCTYPE html>
-<html lang="en" data-palette="ink">
+<html lang="en" data-palette="paper">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Prims Browsers</title>
-  <link rel="icon" href="/brand/assets/logos/folio-gold.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#f4f3ef">
+  <link rel="icon" href="/brand/assets/logos/folio-ink.svg" type="image/svg+xml" id="favicon">
   <link rel="stylesheet" href="/brand/kit.css">
-  <link rel="stylesheet" href="/desk.css">
+  <link rel="stylesheet" href="/brand/blocks/nav-row/block.css?v=defaults">
+  <link rel="stylesheet" href="/desk.css?v=send">
 </head>
 <body>
-  <aside class="rail" aria-label="Tenants">
-    <div class="mark">
-      <img src="/brand/assets/logos/folio-gold.svg" width="28" height="28" alt="">
-      <p class="kicker">Prims Browsers</p>
+  <header class="bar">
+    <a class="brand" href="/" aria-label="Prims Browsers">
+      <img id="folio" src="/brand/assets/logos/folio-ink.svg" alt="" width="32" height="50">
+      <span class="word">Prims Browsers</span>
+    </a>
+    <div class="pal" role="group" aria-label="Palette">
+      <button type="button" data-p="paper" aria-pressed="true">Paper</button>
+      <button type="button" data-p="ink" aria-pressed="false">Ink</button>
+      <button type="button" data-p="system" aria-pressed="false">System</button>
     </div>
-    <p class="sub">The glass is a view. Close it; the jar stays.</p>
-    <ul id="rail"></ul>
-    <p class="foot" id="source"></p>
-  </aside>
-  <main class="stage">
-    <header class="stage-bar">
-      <div>
-        <h1 id="title">Pick a tenant</h1>
-        <p id="meta" class="meta"></p>
+  </header>
+  <div class="work">
+    <aside class="rail" aria-label="Tenants">
+      <ul id="rail"></ul>
+      <p class="foot" id="source"></p>
+    </aside>
+    <main class="stage">
+      <header class="stage-bar">
+        <div>
+          <h1 id="title">Your browser</h1>
+          <p id="meta" class="meta"></p>
+        </div>
+        <div class="acts">
+          <button type="button" id="work-btn" hidden>Work</button>
+          <button type="button" id="vault-btn" hidden>Vault</button>
+          <button type="button" id="watch" hidden>Open in its own tab</button>
+          <button type="button" id="close" hidden>Close this view</button>
+        </div>
+      </header>
+      <div id="empty" class="empty">Add glass to tenants.json so this desk has a jar.</div>
+      <div id="browser" class="browser" hidden>
+        <div class="tabs" id="tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="chrome">
+          <button type="button" id="back" aria-label="Back">←</button>
+          <button type="button" id="fwd" aria-label="Forward">→</button>
+          <form id="omnibox" autocomplete="off">
+            <input id="url" type="text" spellcheck="false" aria-label="URL" placeholder="https://">
+          </form>
+          <div class="hands">
+            <span class="hands-who" id="hands-who">You drive this glass</span>
+            <button type="button" id="continue" hidden>Continue</button>
+            <button type="button" id="takeover">Take over</button>
+          </div>
+        </div>
+        <form class="chrome-send" id="page-send" autocomplete="off">
+          <input id="page-text" type="text" spellcheck="false" autocomplete="off" aria-label="Send into the page" placeholder="Click a field on the page, then type here">
+          <button type="submit" id="page-send-btn">Send</button>
+        </form>
+        <div class="glass-wrap" id="glass-wrap">
+          <iframe id="glass" title="Tenant Chromium" allow="clipboard-read; clipboard-write"></iframe>
+          <div class="ghost-cursor" id="ghost-cursor" hidden></div>
+        </div>
       </div>
-      <div class="acts">
-        <button type="button" id="watch" hidden>Open in its own tab</button>
-        <button type="button" id="close" hidden>Close this view</button>
+    </main>
+  </div>
+  <div id="vault" class="sheet" hidden>
+    <div class="sheet-card vault-card">
+      <header>
+        <h2 id="vault-title">Vault</h2>
+        <button type="button" id="vault-close">Close</button>
+      </header>
+      <p class="sheet-note">System vault plus any vaults you connect. Secrets stay hidden until you reveal them.</p>
+      <p id="vault-empty" class="vault-empty" hidden>Nothing saved for this tenant yet. Add a login below.</p>
+      <ul id="vault-list" class="vault-list"></ul>
+      <form id="vault-form" autocomplete="off">
+        <p class="vault-add-label">Add a login</p>
+        <label>Site
+          <input id="vault-host" type="text" name="vault-host" autocomplete="off" spellcheck="false" required>
+        </label>
+        <label>Username
+          <input id="vault-login" type="text" name="vault-login" autocomplete="off" spellcheck="false" required>
+        </label>
+        <label>Password
+          <span class="secret-field">
+            <input id="vault-pass" type="password" name="vault-secret" autocomplete="off" required data-lpignore="true" data-1p-ignore="true">
+            <button type="button" id="vault-pass-reveal" aria-pressed="false" aria-label="Show password">Show</button>
+          </span>
+        </label>
+        <button type="submit">Save</button>
+      </form>
+    </div>
+  </div>
+  <div id="login-ask" class="sheet" hidden>
+    <div class="sheet-card">
+      <header>
+        <h2 id="ask-title">Sign in</h2>
+        <button type="button" id="ask-close">Close</button>
+      </header>
+      <p id="ask-copy" class="sheet-note"></p>
+      <ul id="ask-list" class="ask-list"></ul>
+      <form id="ask-save" class="ask-save" hidden autocomplete="off">
+        <label>Username
+          <input id="ask-login" type="text" name="ask-login" autocomplete="off" spellcheck="false" required>
+        </label>
+        <label>Password
+          <span class="secret-field">
+            <input id="ask-pass" type="password" name="ask-secret" autocomplete="off" required data-lpignore="true" data-1p-ignore="true">
+            <button type="button" id="ask-pass-reveal" aria-pressed="false" aria-label="Show password">Show</button>
+          </span>
+        </label>
+        <button type="submit">Save and fill</button>
+      </form>
+      <div class="ask-acts">
+        <button type="button" id="ask-approve">Fill</button>
+        <button type="button" id="ask-vault">Vault</button>
+        <button type="button" id="ask-deny">Not now</button>
       </div>
-    </header>
-    <div id="empty" class="empty">Five desks. Click Greenmark to put the glass here.</div>
-    <iframe id="glass" title="Tenant Chromium"></iframe>
-  </main>
-  <script src="/desk.js"></script>
+    </div>
+  </div>
+  <script src="/desk.js?v=send"></script>
 </body>
 </html>

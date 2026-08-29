@@ -144,6 +144,21 @@
         "default"
       ],
       "dir": "blocks/page-hero"
+    },
+    {
+      "id": "block:nav-row",
+      "name": "NavRow",
+      "when": "A selectable row in a rail or chat list. Title plus a quieter lede. Optional ink mark.",
+      "refuses": [
+        "accent stripe or color bar on the leading edge of the selected row",
+        "Claude-style left border highlight",
+        "gold fill on the row"
+      ],
+      "states": [
+        "default",
+        "current"
+      ],
+      "dir": "blocks/nav-row"
     }
   ],
   "deprecated": {

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Prims Browsers — headed Chromium per tenant.
+"""Prims Browsers — sandbox jars agents can drive without your local mouse.
 
-Tenant list is tenants.json (source=mock). Later: `prims-desktop tenants --json`.
-Hands are ours: CDP first, VNC/xdotool if the page will not yield.
+Paseo plugin: usually one tenant. Local desk: multi-tenant sandboxes.
+tenants.json (or PRIMS_BROWSERS_TENANTS). Vault is an add-on.
+Hands: CDP first, VNC/xdotool in the jar — not host Accessibility.
 Not eidos-browsing.
 """
 
@@ -53,15 +54,11 @@ _LOGIN_ASKED: dict[str, dict[str, str]] = {}
 _LOGIN_HOST: dict[str, str] = {}
 _LOGIN_PAYLOAD: dict[str, dict] = {}
 STEER_HOLD = 15.0
-WORK_URLS = {
-    "eidos": "https://chatgpt.com/",
-    "gmw": "https://www.amazon.com/",
-    "aic": "https://www.bbc.com/news",
-    "arp": "https://www.npr.org/",
-    "reeves": "https://www.theguardian.com/us",
-}
+INSERT_MAX = 32000
 
-USAGE = """prims-browsers — headed Chromium per tenant (mock)
+USAGE = """prims-browsers — agent sandboxes (jar mouse ≠ your mouse)
+
+  Plugin: one tenant. Local desk: multi-tenant is normal.
 
   prims-browsers tenants
   prims-browsers status [<id>]
@@ -77,6 +74,10 @@ USAGE = """prims-browsers — headed Chromium per tenant (mock)
   prims-browsers focus <id> <url>
   prims-browsers doctor
   prims-browsers test
+  prims-browsers vaults
+  prims-browsers vaults connect paseo-vault <path> [--id name]
+  prims-browsers vaults disconnect <id>
+  prims-browsers vaults write <id>
   prims-browsers vnc-key <id> <Key>
   prims-browsers vnc-type <id> <text>
   prims-browsers vnc-move <id> <x> <y>
@@ -85,7 +86,9 @@ USAGE = """prims-browsers — headed Chromium per tenant (mock)
   prims-browsers record <id> stop
   prims-browsers record <id> status
 
-Hands: CDP (fast), then VNC/xdotool. Address is the tenant/jar id.
+Config: tenants.json (or PRIMS_BROWSERS_TENANTS).
+Vault: system vault is always on; connect your own (paseo-vault, …) with vaults connect.
+Hands: CDP, then VNC/xdotool inside the jar. Address is the tenant id.
 """
 
 
@@ -126,6 +129,12 @@ def find_tenant(doc: dict, tid: str) -> dict:
         if row.get("id") == tid:
             return row
     raise SystemExit(f"unknown tenant {tid}")
+
+
+def work_url(row: dict) -> str | None:
+    """Agent work target: explicit work, else home. None if neither set."""
+    url = (row.get("work") or row.get("home") or "").strip()
+    return url or None
 
 
 def want_json(args: list[str]) -> bool:
@@ -181,7 +190,9 @@ def glass_status(row: dict) -> dict:
             "id": row["id"],
             "label": row.get("label") or row["id"],
             "sandbox": row.get("sandbox") or f"sandbox:{row['id']}",
-            "state": "mocked",
+            "state": "no-glass",
+            "home": row.get("home"),
+            "work": work_url(row),
             "glass": None,
         }
     container = glass.get("container")
@@ -199,6 +210,8 @@ def glass_status(row: dict) -> dict:
         "label": row.get("label") or row["id"],
         "sandbox": row.get("sandbox") or f"sandbox:{row['id']}",
         "state": state,
+        "home": row.get("home"),
+        "work": work_url(row),
         "glass": {
             "container": container,
             "container_ok": running,
@@ -218,24 +231,33 @@ def cmd_tenants(doc: dict, json_mode: bool) -> int:
             "id": t["id"],
             "label": t.get("label") or t["id"],
             "home": t.get("home"),
+            "work": work_url(t),
             "has_glass": bool(t.get("glass")),
         }
         for t in tenants(doc)
     ]
-    payload = {"source": doc.get("source") or "mock", "later": doc.get("later"), "tenants": rows}
-    lines = [f"{r['id']:8} {r['label']:12} {r['sandbox']:16} {'glass' if r['has_glass'] else 'mocked'}" for r in rows]
-    header = f"source={payload['source']}  later={payload['later']}\n"
+    payload = {
+        "source": doc.get("source") or "file",
+        "path": str(TENANTS_PATH),
+        "tenants": rows,
+    }
+    lines = []
+    for r in rows:
+        kind = "glass" if r["has_glass"] else "no-glass"
+        target = r.get("work") or r.get("home") or "-"
+        lines.append(f"{r['id']:8} {r['label']:12} {kind:8} {target}")
+    header = f"source={payload['source']}  path={payload['path']}\n"
     return emit(payload, json_mode, header + "\n".join(lines))
 
 
 def cmd_status(doc: dict, tid: str | None, json_mode: bool) -> int:
     rows = tenants(doc) if tid is None else [find_tenant(doc, tid)]
     reports = [glass_status(r) for r in rows]
-    payload = {"source": doc.get("source") or "mock", "tenants": reports}
+    payload = {"source": doc.get("source") or "file", "path": str(TENANTS_PATH), "tenants": reports}
     lines = []
     for r in reports:
         extra = ""
-        if r["state"] != "mocked" and r.get("glass"):
+        if r["state"] != "no-glass" and r.get("glass"):
             extra = f"  {r['glass'].get('vnc') or ''}"
         lines.append(f"{r['id']:8} {r['state']:8} {r['sandbox']}{extra}")
     return emit(payload, json_mode, "\n".join(lines))
@@ -918,7 +940,7 @@ def start_watchers() -> None:
             name=f"watch-{row['id']}",
         ).start()
         if os.environ.get("PRIMS_BROWSERS_AUTOWORK"):
-            url = WORK_URLS.get(row["id"])
+            url = work_url(row)
             if url:
                 start_work(row["id"], url)
 
@@ -1054,10 +1076,22 @@ def chrome_snapshot(row: dict) -> dict:
     return base
 
 
-def chrome_action(row: dict, action: str, url: str | None = None, tab: str | None = None) -> dict:
+def chrome_action(row: dict, action: str, url: str | None = None, tab: str | None = None, text: str | None = None) -> dict:
     if action == "takeover":
         set_steer(row["id"], "takeover", False)
         return {"ok": True, "action": "takeover", "id": row["id"]}
+    if action == "insert":
+        raw = text if isinstance(text, str) else ""
+        if not raw:
+            raise RuntimeError("text required")
+        if len(raw) > INSERT_MAX:
+            raise RuntimeError("text too long")
+        cdp = cdp_base(row)
+        _page, ws = cdp_lib.first_page_ws(cdp, tab)
+        with steering(row["id"], "insert"):
+            cdp_lib.call(ws, "Input.insertText", {"text": raw})
+        actlog.add("chrome.insert", id=row["id"], n=len(raw), via="cdp")
+        return {"ok": True, "action": "insert", "n": len(raw), "via": "cdp"}
     cdp = cdp_base(row)
     if action == "activate":
         if not tab:
@@ -1168,7 +1202,17 @@ class DeskHandler(SimpleHTTPRequestHandler):
             tid = (query.get("id") or [None])[0]
             if not tid:
                 return self._send_json({"error": "id required"}, 400)
-            return self._send_json({"id": tid, "records": vault_lib.list_records(tid)})
+            info = vault_lib.describe_vaults()
+            return self._send_json(
+                {
+                    "id": tid,
+                    "records": vault_lib.list_records(tid),
+                    "write": info["write"],
+                    "vaults": info["vaults"],
+                }
+            )
+        if path in ("/api/vaults", "/api/vaults/"):
+            return self._send_json(vault_lib.describe_vaults())
         if path in ("/api/vault/secret", "/api/vault/secret/"):
             tid = (query.get("id") or [None])[0]
             rid = (query.get("record") or [None])[0]
@@ -1190,7 +1234,7 @@ class DeskHandler(SimpleHTTPRequestHandler):
         if path in ("/api/status",):
             doc = load_doc()
             reports = [glass_status(r) for r in tenants(doc)]
-            return self._send_json({"source": doc.get("source") or "mock", "later": doc.get("later"), "tenants": reports})
+            return self._send_json({"source": doc.get("source") or "file", "path": str(TENANTS_PATH), "tenants": reports})
         if path in ("/api/chrome", "/api/chrome/"):
             tid = (query.get("id") or [None])[0]
             if not tid:
@@ -1265,15 +1309,48 @@ class DeskHandler(SimpleHTTPRequestHandler):
             if not tid:
                 return self._send_json({"error": "id required"}, 400)
             if data.get("remove"):
-                ok = vault_lib.remove(tid, data.get("record") or "")
+                ok = vault_lib.remove(tid, data.get("record") or "", vault_id=data.get("vault"))
                 actlog.add("vault.remove", id=tid, record=data.get("record"), ok=ok)
                 return self._send_json({"ok": ok, "id": tid, "records": vault_lib.list_records(tid)})
             try:
-                row = vault_lib.add(tid, data.get("host") or "", data.get("login") or "", data.get("password") or "")
+                row = vault_lib.add(
+                    tid,
+                    data.get("host") or "",
+                    data.get("login") or "",
+                    data.get("password") or "",
+                    vault_id=data.get("vault"),
+                )
             except ValueError as e:
                 return self._send_json({"error": str(e)}, 400)
-            actlog.add("vault.add", id=tid, host=row.get("host"), login=row.get("login"), record=row.get("id"))
+            actlog.add(
+                "vault.add",
+                id=tid,
+                host=row.get("host"),
+                login=row.get("login"),
+                record=row.get("id"),
+                vault=row.get("vault"),
+            )
             return self._send_json({"ok": True, "record": row, "records": vault_lib.list_records(tid)})
+        if path in ("/api/vaults/connect", "/api/vaults/connect/"):
+            try:
+                row = vault_lib.connect(
+                    data.get("kind") or "",
+                    data.get("path") or "",
+                    vault_id=data.get("id"),
+                    label=data.get("label"),
+                )
+            except ValueError as e:
+                return self._send_json({"error": str(e)}, 400)
+            return self._send_json({"ok": True, "vault": row, **vault_lib.describe_vaults()})
+        if path in ("/api/vaults/disconnect", "/api/vaults/disconnect/"):
+            ok = vault_lib.disconnect(data.get("id") or "")
+            return self._send_json({"ok": ok, **vault_lib.describe_vaults()}, 200 if ok else 400)
+        if path in ("/api/vaults/write", "/api/vaults/write/"):
+            try:
+                vid = vault_lib.set_write(data.get("id") or "")
+            except ValueError as e:
+                return self._send_json({"error": str(e)}, 400)
+            return self._send_json({"ok": True, "write": vid, **vault_lib.describe_vaults()})
         if path in ("/api/login-approve", "/api/login-approve/"):
             tid = data.get("id")
             rid = data.get("record")
@@ -1295,9 +1372,14 @@ class DeskHandler(SimpleHTTPRequestHandler):
             return self._send_json({"ok": True, "id": tid})
         if path in ("/api/work", "/api/work/"):
             tid = data.get("id")
-            url = data.get("url") or WORK_URLS.get(tid)
+            url = data.get("url")
+            if not url and tid:
+                try:
+                    url = work_url(find_tenant(load_doc(), tid))
+                except SystemExit:
+                    url = None
             if not tid or not url:
-                return self._send_json({"error": "id and url required"}, 400)
+                return self._send_json({"error": "id and url required (set tenants[].work or pass url)"}, 400)
             if data.get("on") is False:
                 stop_work(tid)
                 return self._send_json({"ok": True, "id": tid, "work": False})
@@ -1307,9 +1389,15 @@ class DeskHandler(SimpleHTTPRequestHandler):
             action = data.get("action")
             if not tid or not action:
                 return self._send_json({"error": "id and action required"}, 400)
+            if action == "insert":
+                raw = data.get("text")
+                if not isinstance(raw, str) or not raw:
+                    return self._send_json({"error": "text required"}, 400)
+                if len(raw) > INSERT_MAX:
+                    return self._send_json({"error": "text too long"}, 400)
             try:
                 row = find_tenant(load_doc(), tid)
-                result = chrome_action(row, action, url=data.get("url"), tab=data.get("tab"))
+                result = chrome_action(row, action, url=data.get("url"), tab=data.get("tab"), text=data.get("text"))
             except SystemExit as e:
                 return self._send_json({"error": str(e)}, 404)
             except Exception as e:
@@ -1452,11 +1540,11 @@ def cmd_vnc(doc: dict, tid: str | None, json_mode: bool) -> int:
     if not tid:
         return emit({"error": "vnc needs a tenant id"}, json_mode, "vnc needs a tenant id", 2)
     report = glass_status(find_tenant(doc, tid))
-    if report["state"] == "mocked":
+    if report["state"] == "no-glass":
         return emit(
-            {**report, "error": "no glass yet (mock tenant)"},
+            {**report, "error": "no glass — add glass.container/vnc/cdp in tenants.json"},
             json_mode,
-            f"{tid} is mocked — no VNC. Only tenants with glass in tenants.json open.",
+            f"{tid} has no glass. Add glass to tenants.json to open VNC.",
             2,
         )
     url = (report.get("glass") or {}).get("vnc")
@@ -1691,6 +1779,52 @@ def cmd_vnc_click(doc: dict, rest: list[str], json_mode: bool) -> int:
     return emit(payload, json_mode, f"vnc-click {x},{y} ok={payload['ok']}", 0 if payload["ok"] else 1)
 
 
+def cmd_vaults(rest: list[str], json_mode: bool) -> int:
+    if not rest or rest[0] in ("list", "status"):
+        data = vault_lib.describe_vaults()
+        lines = [f"write={data['write']}  config={data['config']}"]
+        for v in data["vaults"]:
+            mark = "builtin" if v.get("builtin") else "connected"
+            lines.append(f"{v['id']:12} {v['kind']:12} {mark:10} {v.get('path')}")
+        return emit(data, json_mode, "\n".join(lines))
+    sub, args = rest[0], rest[1:]
+    if sub == "connect":
+        if len(args) < 2:
+            return emit({"error": "vaults connect <kind> <path>"}, json_mode, "vaults connect <kind> <path> [--id name]", 2)
+        kind, path = args[0], args[1]
+        vid = None
+        label = None
+        i = 2
+        while i < len(args):
+            if args[i] == "--id" and i + 1 < len(args):
+                vid = args[i + 1]
+                i += 2
+            elif args[i] == "--label" and i + 1 < len(args):
+                label = args[i + 1]
+                i += 2
+            else:
+                i += 1
+        try:
+            row = vault_lib.connect(kind, path, vault_id=vid, label=label)
+        except ValueError as e:
+            return emit({"error": str(e)}, json_mode, str(e), 2)
+        return emit(row, json_mode, f"connected {row['id']} ({row['kind']}) → {row['path']}")
+    if sub == "disconnect":
+        if not args:
+            return emit({"error": "vaults disconnect <id>"}, json_mode, "vaults disconnect <id>", 2)
+        ok = vault_lib.disconnect(args[0])
+        return emit({"ok": ok, "id": args[0]}, json_mode, f"disconnect {args[0]} ok={ok}", 0 if ok else 1)
+    if sub == "write":
+        if not args:
+            return emit({"error": "vaults write <id>"}, json_mode, "vaults write <id>", 2)
+        try:
+            vid = vault_lib.set_write(args[0])
+        except ValueError as e:
+            return emit({"error": str(e)}, json_mode, str(e), 2)
+        return emit({"write": vid}, json_mode, f"write → {vid}")
+    return emit({"error": f"unknown vaults subcommand {sub}"}, json_mode, f"unknown vaults subcommand {sub}", 2)
+
+
 def cmd_test(json_mode: bool) -> int:
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", str(ROOT / "tests"), "-q", "--tb=short"],
@@ -1701,18 +1835,29 @@ def cmd_test(json_mode: bool) -> int:
 
 
 def cmd_doctor(doc: dict, json_mode: bool) -> int:
-    reports = [glass_status(r) for r in tenants(doc)]
+    rows = tenants(doc)
+    reports = [glass_status(r) for r in rows]
     ids = [r["id"] for r in reports]
-    expected = ["eidos", "gmw", "aic", "arp", "reeves"]
     live = [r for r in reports if r["state"] == "live"]
-    mocked = [r for r in reports if r["state"] == "mocked"]
+    no_glass = [r for r in reports if r["state"] == "no-glass"]
     findings = []
-    if ids != expected:
-        findings.append(f"tenant ids {ids} != {expected}")
-    if (doc.get("source") or "") != "mock":
-        findings.append("source should stay mock until prims-desktop tenants exists")
-    if len(live) < 5:
-        findings.append(f"live glass {len(live)}/5")
+    if not rows:
+        findings.append("tenants.json has no tenants — copy tenants.example.json")
+    seen = set()
+    for t in rows:
+        tid = t.get("id")
+        if not tid:
+            findings.append("tenant missing id")
+            continue
+        if tid in seen:
+            findings.append(f"duplicate tenant id {tid}")
+        seen.add(tid)
+        glass = t.get("glass")
+        if not glass:
+            continue
+        for key in ("container", "vnc", "cdp"):
+            if not glass.get(key):
+                findings.append(f"{tid} glass missing {key}")
     for r in live:
         container = ((r.get("glass") or {}).get("container"))
         fs, fs_detail = jar_fullscreen(container)
@@ -1732,19 +1877,19 @@ def cmd_doctor(doc: dict, json_mode: bool) -> int:
     ok = not findings
     payload = {
         "ok": ok,
-        "source": doc.get("source"),
-        "later": doc.get("later"),
+        "source": doc.get("source") or "file",
+        "path": str(TENANTS_PATH),
         "desk": {"url": DESK_URL, "ok": desk_ok, "detail": desk_detail},
         "cdp": {"ok": cdp_ok, "detail": cdp_detail},
         "tenants": ids,
         "live": [r["id"] for r in live],
-        "mocked": [r["id"] for r in mocked],
+        "no_glass": [r["id"] for r in no_glass],
         "findings": findings,
         "reports": reports,
     }
     text = (
-        f"ok={ok} source={doc.get('source')} live={','.join(payload['live']) or '-'} "
-        f"mocked={len(mocked)}/{len(reports)} desk={'up' if desk_ok else 'down'} "
+        f"ok={ok} source={payload['source']} live={','.join(payload['live']) or '-'} "
+        f"no-glass={len(no_glass)}/{len(reports)} desk={'up' if desk_ok else 'down'} "
         f"cdp={'up' if cdp_ok else 'down'}"
     )
     if findings:
@@ -1765,6 +1910,8 @@ def main(argv: list[str]) -> int:
     cmd, rest = pos[0], pos[1:]
     if cmd == "test":
         return cmd_test(json_mode)
+    if cmd == "vaults":
+        return cmd_vaults(rest, json_mode)
     doc = load_doc()
     if cmd in ("tenants", "list"):
         return cmd_tenants(doc, json_mode)

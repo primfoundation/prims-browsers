@@ -1,5 +1,22 @@
+.pytest_cache/
 .desk.pid
+.desk.*.pid
+.desk.*.stamp
 .desk.log
-__pycache__/
+**/__pycache__/
 *.pyc
 .DS_Store
+
+# Local machine config (private fleets, personal tenants)
+tenants.json
+tenants.local.json
+jars/compose.local.yaml
+jars/compose.gmw.yaml
+jars/tenants.gmw.json
+vaults.json
+
+# Runtime / agent proof clutter
+.shipr/
+.testr/test-attempts/
+.testr/proofs/
+*.mp4

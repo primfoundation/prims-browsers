@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Saved</title></head>
+<body>
+  <p>Save password for this site?</p>
+  <button type="button" id="never">Never</button>
+  <button type="button" id="notnow">Not now</button>
+  <script>
+    window.__clicked = [];
+    document.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => { window.__clicked.push(b.id); b.remove(); });
+    });
+  </script>
+</body>
+</html>

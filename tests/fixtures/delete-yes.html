@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Delete?</title></head>
+<body>
+  <p>Delete this conversation?</p>
+  <button type="button" id="yes">Yes</button>
+  <button type="button" id="cancel">Cancel</button>
+  <script>
+    window.__clicked = [];
+    document.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => { window.__clicked.push(b.id); });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+  <input type="email" autocomplete="username">
+  <button type="button" id="signin">Sign in</button>
+  <button type="button" id="notnow">Not now</button>
+  <script>
+    window.__clicked = [];
+    document.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => { window.__clicked.push(b.id); });
+    });
+  </script>
+</body>
+</html>

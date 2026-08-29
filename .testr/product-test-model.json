@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "product_id": "prims-browsers",
+  "description": "Isolated proofs for vault, agentic login fixture, and desk vault UI. Does not drive live tenant jars.",
+  "test_commands": [
+    "python3 -m pytest tests/ -q --tb=short"
+  ],
+  "test_suites": {
+    "default": [
+      "python3 -m pytest tests/ -q --tb=short"
+    ]
+  },
+  "evidence_paths": [
+    "tests/",
+    ".testr/test-attempts/"
+  ]
+}

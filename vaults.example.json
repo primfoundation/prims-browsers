@@ -1,0 +1,12 @@
+{
+  "write": "system",
+  "connected": [
+    {
+      "id": "paseo",
+      "kind": "paseo-vault",
+      "path": "~/.paseo/paseo-vault",
+      "label": "Paseo",
+      "enabled": true
+    }
+  ]
+}

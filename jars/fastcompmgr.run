@@ -1,0 +1,16 @@
+#!/bin/sh
+set -u
+export DISPLAY="${DISPLAY:-:0}"
+# Compositing on Xvnc flickers the noVNC stream.
+hsetroot -solid black 2>/dev/null || true
+# Chromium must not go fullscreen; that hides tabs/omnibox/back/forward.
+while true; do
+    sleep 2
+    ids=$(xdotool search --onlyvisible --class Chromium 2>/dev/null || true)
+    for id in $ids; do
+        st=$(xprop -id "$id" _NET_WM_STATE 2>/dev/null || true)
+        [ -n "$st" ] || continue
+        echo "$st" | grep -q FULLSCREEN && xdotool windowstate --remove FULLSCREEN "$id" 2>/dev/null || true
+        echo "$st" | grep -q BELOW && xdotool windowstate --remove BELOW "$id" 2>/dev/null || true
+    done
+done

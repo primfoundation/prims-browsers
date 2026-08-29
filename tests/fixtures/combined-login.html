@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+  <form id="f">
+    <input id="user" type="email" autocomplete="username">
+    <input id="pass" type="password" autocomplete="current-password">
+    <button type="button" id="go">Sign in</button>
+  </form>
+  <script>
+    document.getElementById("go").addEventListener("click", () => {
+      const u = document.getElementById("user").value;
+      const p = document.getElementById("pass").value;
+      if (u && p) document.body.dataset.in = u + ":" + (p ? "set" : "empty");
+    });
+  </script>
+</body>
+</html>

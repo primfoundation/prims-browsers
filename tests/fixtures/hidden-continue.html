@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+  <section id="step-user" hidden>
+    <input id="user" type="email" autocomplete="username" value="already@x">
+    <button type="button" id="go-user">Continue</button>
+  </section>
+  <section id="step-pass">
+    <p>Signing in as <span data-remembered>already@x</span></p>
+    <input id="pass" type="password" autocomplete="current-password">
+    <button type="button" id="go-pass">Sign in</button>
+  </section>
+  <script>
+    window.__clicked = [];
+    document.querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => { window.__clicked.push(b.id); });
+    });
+    document.getElementById("go-pass").addEventListener("click", () => {
+      document.getElementById("step-pass").hidden = true;
+      document.body.insertAdjacentHTML("beforeend", "<p id=ok>signed in</p>");
+    });
+  </script>
+</body>
+</html>

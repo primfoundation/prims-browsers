@@ -1,0 +1,17 @@
+{
+  "source": "file",
+  "note": "Paseo plugin: one tenant is enough. Local desk: add more tenants for more sandboxes (agent mouse stays in the jar).",
+  "tenants": [
+    {
+      "id": "alpha",
+      "label": "Alpha",
+      "home": "https://example.com/",
+      "work": "https://example.com/",
+      "glass": {
+        "container": "prims-browsers-alpha",
+        "vnc": "http://127.0.0.1:15801",
+        "cdp": "http://127.0.0.1:19221"
+      }
+    }
+  ]
+}

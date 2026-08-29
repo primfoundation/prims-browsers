@@ -1,9 +1,10 @@
-# Five tenant jars. Greenmark stays on the existing logged-in box
-# (the sample jar). These four are new.
+# Sample jars for local multi-tenant. Plugin installs often run one jar only.
 #
 #   docker compose -f jars/compose.yaml up -d --build
 #
-# Host binds are loopback only. Profiles live under ~/.prim/prims-browsers/jars.
+# Host binds are loopback only. Profiles: ~/.prim/prims-browsers/jars/<id>
+# Copy a service block to add more sandboxes. Keep private fleets in
+# jars/compose.local.yaml (gitignored).
 
 name: prims-browsers
 
@@ -23,9 +24,9 @@ x-jar: &jar
     - no-new-privileges:true
 
 services:
-  eidos:
+  alpha:
     <<: *jar
-    container_name: prims-browsers-eidos
+    container_name: prims-browsers-alpha
     environment:
       KEEP_APP_RUNNING: "1"
       CHROMIUM_REMOTE_DEBUGGING: "1"
@@ -34,16 +35,16 @@ services:
       DISPLAY_HEIGHT: "1080"
       USER_ID: "1000"
       SECURE_CONNECTION: "0"
-      CHROMIUM_CUSTOM_ARGS: "--test-type --no-first-run --no-default-browser-check --disable-gpu --disable-gpu-compositing --disable-accelerated-2d-canvas --disable-features=PasswordManagerOnboarding,PasswordGeneration --start-maximized https://example.com"
+      CHROMIUM_CUSTOM_ARGS: "--test-type --no-first-run --no-default-browser-check --disable-gpu --disable-gpu-compositing --disable-accelerated-2d-canvas --disable-features=PasswordManagerOnboarding,PasswordGeneration --start-maximized https://example.com/"
     ports:
       - "127.0.0.1:15801:5800"
       - "127.0.0.1:19221:9222"
     volumes:
-      - ${HOME}/.prim/prims-browsers/jars/eidos:/config
+      - ${HOME}/.prim/prims-browsers/jars/alpha:/config
 
-  aic:
+  beta:
     <<: *jar
-    container_name: prims-browsers-aic
+    container_name: prims-browsers-beta
     environment:
       KEEP_APP_RUNNING: "1"
       CHROMIUM_REMOTE_DEBUGGING: "1"
@@ -52,45 +53,9 @@ services:
       DISPLAY_HEIGHT: "1080"
       USER_ID: "1000"
       SECURE_CONNECTION: "0"
-      CHROMIUM_CUSTOM_ARGS: "--test-type --no-first-run --no-default-browser-check --disable-gpu --disable-gpu-compositing --disable-accelerated-2d-canvas --disable-features=PasswordManagerOnboarding,PasswordGeneration --start-maximized https://example.org"
+      CHROMIUM_CUSTOM_ARGS: "--test-type --no-first-run --no-default-browser-check --disable-gpu --disable-gpu-compositing --disable-accelerated-2d-canvas --disable-features=PasswordManagerOnboarding,PasswordGeneration --start-maximized https://example.org/"
     ports:
-      - "127.0.0.1:15803:5800"
-      - "127.0.0.1:19223:9222"
+      - "127.0.0.1:15802:5800"
+      - "127.0.0.1:19222:9222"
     volumes:
-      - ${HOME}/.prim/prims-browsers/jars/aic:/config
-
-  arp:
-    <<: *jar
-    container_name: prims-browsers-arp
-    environment:
-      KEEP_APP_RUNNING: "1"
-      CHROMIUM_REMOTE_DEBUGGING: "1"
-      CHROMIUM_REMOTE_DEBUGGING_PORT: "9222"
-      DISPLAY_WIDTH: "1920"
-      DISPLAY_HEIGHT: "1080"
-      USER_ID: "1000"
-      SECURE_CONNECTION: "0"
-      CHROMIUM_CUSTOM_ARGS: "--test-type --no-first-run --no-default-browser-check --disable-gpu --disable-gpu-compositing --disable-accelerated-2d-canvas --disable-features=PasswordManagerOnboarding,PasswordGeneration --start-maximized https://example.net"
-    ports:
-      - "127.0.0.1:15804:5800"
-      - "127.0.0.1:19224:9222"
-    volumes:
-      - ${HOME}/.prim/prims-browsers/jars/arp:/config
-
-  reeves:
-    <<: *jar
-    container_name: prims-browsers-reeves
-    environment:
-      KEEP_APP_RUNNING: "1"
-      CHROMIUM_REMOTE_DEBUGGING: "1"
-      CHROMIUM_REMOTE_DEBUGGING_PORT: "9222"
-      DISPLAY_WIDTH: "1920"
-      DISPLAY_HEIGHT: "1080"
-      USER_ID: "1000"
-      SECURE_CONNECTION: "0"
-      CHROMIUM_CUSTOM_ARGS: "--test-type --no-first-run --no-default-browser-check --disable-gpu --disable-gpu-compositing --disable-accelerated-2d-canvas --disable-features=PasswordManagerOnboarding,PasswordGeneration --start-maximized https://example.com"
-    ports:
-      - "127.0.0.1:15805:5800"
-      - "127.0.0.1:19225:9222"
-    volumes:
-      - ${HOME}/.prim/prims-browsers/jars/reeves:/config
+      - ${HOME}/.prim/prims-browsers/jars/beta:/config

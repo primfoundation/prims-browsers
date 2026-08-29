@@ -1,0 +1,2 @@
+<!-- Do not kiosk Chromium. Dummy class so jlesage's "main window" rule never matches. -->
+<Class>NoMainWindowKiosk</Class>
