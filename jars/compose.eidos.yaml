@@ -1,0 +1,40 @@
+# Eidos Prim jar only. Do not `up` jars/compose.yaml (multi-tenant sample) from here.
+# Do not edit /home/eidos/paseo-eidos/docker-compose.yml. Do not bounce paseo-eidos.
+#
+#   docker compose -f jars/compose.eidos.yaml up -d --build
+#
+# Joins existing paseo-eidos-net. Host binds are loopback only.
+# No GMW-style loopback proxy: paseo-eidos has no :18787. This jar must
+# reach public Apple hosts (appleid.apple.com) for login.
+
+name: prims-browsers-eidos
+
+services:
+  eidos:
+    build: .
+    container_name: prims-browsers-eidos
+    shm_size: 512mb
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      KEEP_APP_RUNNING: "1"
+      CHROMIUM_REMOTE_DEBUGGING: "1"
+      CHROMIUM_REMOTE_DEBUGGING_PORT: "9222"
+      DISPLAY_WIDTH: "1920"
+      DISPLAY_HEIGHT: "1080"
+      USER_ID: "1000"
+      SECURE_CONNECTION: "0"
+      CHROMIUM_CUSTOM_ARGS: "--test-type --no-first-run --no-default-browser-check --disable-gpu --disable-gpu-compositing --disable-accelerated-2d-canvas --disable-features=PasswordManagerOnboarding,PasswordGeneration --start-maximized about:blank"
+    ports:
+      - "127.0.0.1:15801:5800"
+      - "127.0.0.1:19221:9222"
+    volumes:
+      - /home/eidos/prims-browsers-eidos/config:/config
+    networks:
+      - eidos
+
+networks:
+  eidos:
+    external: true
+    name: paseo-eidos-net

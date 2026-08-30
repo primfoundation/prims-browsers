@@ -1,0 +1,15 @@
+{
+  "source": "file",
+  "tenants": [
+    {
+      "id": "eidos",
+      "label": "Eidos",
+      "home": "https://paseo-eidos.e1.eidosagi.com",
+      "glass": {
+        "container": "prims-browsers-eidos",
+        "vnc": "/glass/",
+        "cdp": "http://127.0.0.1:19221"
+      }
+    }
+  ]
+}
