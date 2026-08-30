@@ -14,8 +14,29 @@ def test_list_is_public_no_password(vault_dir):
     assert listed[0]["login"] == "you@example.com"
     assert listed[0]["has_password"] is True
     assert "password" not in listed[0]
+    assert listed[0].get("title") == ""
     raw = json.loads((vault_dir / "eidos.json").read_text())
     assert raw["records"][0]["password"] == "secret-never-list"
+
+
+def test_patch_renames_without_password(vault_dir):
+    row = vault.add("eidos", "nickname", "you@example.com", "secret-never-patch")
+    patched = vault.patch_record(
+        "eidos",
+        row["id"],
+        host="appleid.apple.com",
+        title="apple dev id",
+    )
+    assert patched is not None
+    assert patched["host"] == "appleid.apple.com"
+    assert patched["title"] == "apple dev id"
+    assert patched["login"] == "you@example.com"
+    assert "password" not in patched
+    listed = vault.list_records("eidos")
+    assert listed[0]["host"] == "appleid.apple.com"
+    assert "password" not in listed[0]
+    raw = json.loads((vault_dir / "eidos.json").read_text())
+    assert raw["records"][0]["password"] == "secret-never-patch"
 
 
 def test_list_several(vault_dir):

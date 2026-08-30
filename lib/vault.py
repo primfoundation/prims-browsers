@@ -101,6 +101,7 @@ def public(row: dict) -> dict:
         "id": row.get("id"),
         "host": row.get("host"),
         "login": row.get("login"),
+        "title": row.get("title") or "",
         "created_at": row.get("created_at"),
         "last_used_at": row.get("last_used_at"),
         "has_password": bool(row.get("password")),
@@ -161,6 +162,39 @@ class _SystemVault:
             rows.append(row)
             _save(tid, rows)
         return _tag(public(row), self.id, self.kind, self.label)
+
+    def patch(
+        self,
+        tid: str,
+        rid: str,
+        host: str | None = None,
+        login: str | None = None,
+        title: str | None = None,
+    ) -> dict | None:
+        """Change host/login/title only. Never returns password."""
+        with _LOCK:
+            rows = _load(tid)
+            found = None
+            for r in rows:
+                if r.get("id") == rid and not r.get("deleted_at"):
+                    if host is not None:
+                        h = normalize_host(host)
+                        if not h:
+                            raise ValueError("host required")
+                        r["host"] = h
+                    if login is not None:
+                        lg = (login or "").strip()
+                        if not lg:
+                            raise ValueError("login required")
+                        r["login"] = lg
+                    if title is not None:
+                        r["title"] = (title or "").strip()
+                    found = r
+                    break
+            if found is None:
+                return None
+            _save(tid, rows)
+            return _tag(public(found), self.id, self.kind, self.label)
 
     def remove(self, tid: str, rid: str) -> bool:
         with _LOCK:
@@ -383,6 +417,33 @@ def list_for_host(tid: str, host: str) -> list[dict]:
 
 def add(tid: str, host: str, login: str, password: str, vault_id: str | None = None) -> dict:
     return _backend(vault_id).add(tid, host, login, password)
+
+
+def patch_record(
+    tid: str,
+    rid: str,
+    host: str | None = None,
+    login: str | None = None,
+    title: str | None = None,
+    vault_id: str | None = None,
+) -> dict | None:
+    """Rename metadata. Password is not accepted and not returned."""
+    if host is None and login is None and title is None:
+        raise ValueError("host, login, or title required")
+    if vault_id:
+        b = _backend(vault_id)
+        fn = getattr(b, "patch", None)
+        if not fn:
+            raise ValueError(f"vault {vault_id} cannot patch metadata")
+        return fn(tid, rid, host=host, login=login, title=title)
+    for b in backends():
+        fn = getattr(b, "patch", None)
+        if not fn:
+            continue
+        got = fn(tid, rid, host=host, login=login, title=title)
+        if got:
+            return got
+    return None
 
 
 def remove(tid: str, rid: str, vault_id: str | None = None) -> bool:

@@ -75,6 +75,8 @@ USAGE = """prims-browsers — agent sandboxes (jar mouse ≠ your mouse)
   prims-browsers doctor
   prims-browsers test
   prims-browsers vaults
+  prims-browsers vaults records <tenant>
+  prims-browsers vaults patch <tenant> <record-id> [--host h] [--login u] [--title t]
   prims-browsers vaults connect paseo-vault <path> [--id name]
   prims-browsers vaults disconnect <id>
   prims-browsers vaults write <id>
@@ -1312,6 +1314,29 @@ class DeskHandler(SimpleHTTPRequestHandler):
                 ok = vault_lib.remove(tid, data.get("record") or "", vault_id=data.get("vault"))
                 actlog.add("vault.remove", id=tid, record=data.get("record"), ok=ok)
                 return self._send_json({"ok": ok, "id": tid, "records": vault_lib.list_records(tid)})
+            if data.get("patch") or data.get("rename"):
+                try:
+                    row = vault_lib.patch_record(
+                        tid,
+                        data.get("record") or "",
+                        host=data.get("host"),
+                        login=data.get("login"),
+                        title=data.get("title"),
+                        vault_id=data.get("vault"),
+                    )
+                except ValueError as e:
+                    return self._send_json({"error": str(e)}, 400)
+                if not row:
+                    return self._send_json({"error": "not found"}, 404)
+                actlog.add(
+                    "vault.patch",
+                    id=tid,
+                    record=row.get("id"),
+                    host=row.get("host"),
+                    login=row.get("login"),
+                    title=row.get("title"),
+                )
+                return self._send_json({"ok": True, "record": row, "records": vault_lib.list_records(tid)})
             try:
                 row = vault_lib.add(
                     tid,
@@ -1822,6 +1847,46 @@ def cmd_vaults(rest: list[str], json_mode: bool) -> int:
         except ValueError as e:
             return emit({"error": str(e)}, json_mode, str(e), 2)
         return emit({"write": vid}, json_mode, f"write → {vid}")
+    if sub == "records":
+        if not args:
+            return emit({"error": "vaults records <tenant>"}, json_mode, "vaults records <tenant>", 2)
+        rows = vault_lib.list_records(args[0])
+        lines = [f"{r.get('id')}  host={r.get('host')}  login={r.get('login')}  title={r.get('title') or '-'}  pw={'yes' if r.get('has_password') else 'no'}" for r in rows]
+        return emit({"id": args[0], "records": rows}, json_mode, "\n".join(lines) or "(empty)")
+    if sub == "patch":
+        if len(args) < 2:
+            return emit(
+                {"error": "vaults patch <tenant> <record-id>"},
+                json_mode,
+                "vaults patch <tenant> <record-id> [--host h] [--login u] [--title t]",
+                2,
+            )
+        tid, rid = args[0], args[1]
+        host = login = title = None
+        i = 2
+        while i < len(args):
+            if args[i] == "--host" and i + 1 < len(args):
+                host = args[i + 1]
+                i += 2
+            elif args[i] == "--login" and i + 1 < len(args):
+                login = args[i + 1]
+                i += 2
+            elif args[i] == "--title" and i + 1 < len(args):
+                title = args[i + 1]
+                i += 2
+            else:
+                i += 1
+        try:
+            row = vault_lib.patch_record(tid, rid, host=host, login=login, title=title)
+        except ValueError as e:
+            return emit({"error": str(e)}, json_mode, str(e), 2)
+        if not row:
+            return emit({"error": "not found"}, json_mode, "not found", 1)
+        return emit(
+            row,
+            json_mode,
+            f"patched {row.get('id')} host={row.get('host')} login={row.get('login')} title={row.get('title') or '-'}",
+        )
     return emit({"error": f"unknown vaults subcommand {sub}"}, json_mode, f"unknown vaults subcommand {sub}", 2)
 
 
