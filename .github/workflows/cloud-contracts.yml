@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'cloud/**'
+      - 'brand/**'
       - '.github/workflows/cloud-contracts.yml'
 
 permissions:
@@ -28,6 +29,10 @@ jobs:
         with:
           node-version: '22.18.0'
       - name: Install exact direct dependencies
-        run: npm install --ignore-scripts
+        run: npm ci --ignore-scripts
       - name: Typecheck and contract tests
         run: npm run verify
+      - name: Dry-build both Workers with shared brand assets
+        run: npm run dry-run
+        env:
+          WRANGLER_SEND_METRICS: 'false'

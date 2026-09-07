@@ -62,26 +62,23 @@ export async function verifySession(
   token: string | null | undefined,
   secret: string,
 ): Promise<SessionPayload | null> {
-  if (!token || !secret) return null;
-  const parts = token.split(".");
-  if (parts.length !== 2) return null;
-  const [body, sig] = parts;
-  const key = await hmacKey(secret);
-  const ok = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    b64urlDecode(sig),
-    enc.encode(body),
-  );
-  if (!ok) return null;
+  if (!token || token.length > 8192 || !secret || secret.length < 16) return null;
   try {
-    const payload = JSON.parse(
-      new TextDecoder().decode(b64urlDecode(body)),
-    ) as SessionPayload;
-    if (!payload.sub || !payload.exp || payload.exp * 1000 < Date.now()) {
-      return null;
-    }
-    return payload;
+    const parts = token.split(".");
+    if (parts.length !== 2 || parts.some((p) => !/^[A-Za-z0-9_-]+$/.test(p))) return null;
+    const [body, sig] = parts;
+    const key = await hmacKey(secret);
+    const ok = await crypto.subtle.verify("HMAC", key, b64urlDecode(sig), enc.encode(body));
+    if (!ok) return null;
+    const payload = JSON.parse(new TextDecoder().decode(b64urlDecode(body)));
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload || typeof payload !== "object" ||
+        typeof payload.sub !== "string" || !payload.sub ||
+        !Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp) ||
+        payload.exp <= now || payload.iat > now + 60 || payload.exp <= payload.iat ||
+        (payload.email !== undefined && typeof payload.email !== "string") ||
+        (payload.name !== undefined && typeof payload.name !== "string")) return null;
+    return payload as SessionPayload;
   } catch {
     return null;
   }

@@ -1,34 +1,24 @@
 # Prims Browsers cloud consolidation
 
-This directory is the future home for the two Cloudflare surfaces that exist only to operate **Prims Browsers**. It starts by centralizing their duplicated session contract and exact migration metadata. Production routes remain in the legacy repositories until preview and real-account acceptance pass.
+Both Cloudflare applications now live here: `apps/login` is the Apple sign-in door and `apps/gateway` is the authenticated container list/hop surface. They import one `shared/session.ts` and reuse the repository's `brand/` assets. Exact source commits and compatibility gates are recorded in [migration.json](migration.json).
 
-## Target
+The source imports are adapted, not byte-for-byte mirrors. They remove the legacy unsigned Apple identity-token decoder, missing-secret development bypass and embedded fallback fleet. Apple tokens now require a valid RS256 signature from Apple JWKS, issuer, audience, expiry and state-bound nonce. Valid legacy HMAC sessions remain compatible; malformed or incorrectly typed tokens fail closed. Invalid/ambiguous fleet configuration exposes no containers.
 
-```text
-cloud/
-  shared/
-    session.ts
-  apps/
-    login/       # future import from primfoundation/logins-prims-sh
-    gateway/     # future import from primfoundation/browsers-prims-sh
-  migration.json
+## Verify
+
+```bash
+cd cloud
+npm ci --ignore-scripts
+npm run verify
+npm run dry-run
 ```
 
-The two source repositories currently duplicate the exact same `src/session.ts` Git blob. That is now represented once under `cloud/shared/session.ts` with compatibility tests. No `SESSION_SECRET`, Apple private key, user cookie or container credential is copied into Git.
+The 13 tests cover shared legacy sessions, authenticated/unauthenticated gateway routes, deep-link errors, logout, configuration failure, signed/forged Apple-token fixtures and a complete mocked Apple form-post/token-exchange/JWKS/session/gateway round trip. Both actual Worker entry points typecheck and dry-build with shared assets. These are synthetic/local proofs; they do not establish a real Apple account or production browser-container session.
 
-## Locked production behavior
+## Preview and cutover
 
-- `login.prims.sh` remains the Apple OAuth door.
-- Apple's form-post callback needs its cross-site state-cookie behavior preserved.
-- `prims_session` remains HMAC-SHA256 and scoped to `.prims.sh` during compatibility migration.
-- `browsers.prims.sh` remains the authenticated container list/hop surface.
-- Container hosts retain their separate Authentik gate.
-- Foundation Hub/publisher identity is **not** substituted for the browser-product login.
+Checked-in Worker names end in `-preview`. Route URLs use `.invalid`, `COOKIE_DOMAIN` is empty (host-only), and `CONTAINERS` is empty. Set approved preview URLs and synthetic fleet configuration before deployment. Keep secret values in Cloudflare bindings. A real end-to-end preview across separate login/gateway hosts needs a controlled shared parent domain and matching cookie scope; unrelated workers.dev hosts cannot share a host-only cookie.
 
-The current shared-secret cookie design is preserved only to make consolidation non-breaking. A future identity redesign must be a separate security/version migration with a dual-read or explicit logout/cutover plan.
+For production compatibility, preserve `login.prims.sh`, `browsers.prims.sh`, `prims_session`, `.prims.sh` scope, the deliberate shared-secret migration window, Apple's cross-site POST state cookie and the independent Authentik gate at container hosts. At cutover, restart login attempts begun by the old Worker because they lack the new nonce; already-valid session cookies remain verifiable.
 
-## What is not done yet
-
-The login/gateway application sources, public assets and wrangler configs have not been imported in this first slice. DNS, Cloudflare Workers, Apple configuration and production secrets are untouched. The legacy repositories are not archived and their histories remain authoritative for their current deployed code.
-
-Next: import each source commit into `cloud/apps/*` with provenance, replace its local session file with this shared contract, run the legacy test behavior from here, then produce non-production Workers before any route cutover.
+Before moving routes, record preview deployments and source revisions; verify real Apple callback, existing sessions, logout, invalid sessions and a real container hop. Retain the prior Worker versions, routes and configuration for rollback. Restore both surfaces together if shared-contract acceptance fails, then repeat health/session checks. Record an actual recovery drill and observation window before archiving either source repository. No account, Apple service configuration, live Worker, DNS route or legacy history was changed by this import.
