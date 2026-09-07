@@ -1,0 +1,93 @@
+{
+  "format": "prims-browsers-cloud-migration",
+  "version": 1,
+  "observed_at": "2026-09-07",
+  "target_repository": "primfoundation/prims-browsers",
+  "target_layout": {
+    "shared_session": "cloud/shared/session.ts",
+    "login": "cloud/apps/login",
+    "gateway": "cloud/apps/gateway"
+  },
+  "sources": [
+    {
+      "repository": "primfoundation/logins-prims-sh",
+      "commit": "15abc2716afddc8c127d25cd84630146442bd299",
+      "target": "cloud/apps/login",
+      "domain": "login.prims.sh",
+      "purpose": "Sign in with Apple door for Prims Browsers",
+      "source_blobs": {
+        "src/apple.ts": "d4865279834305bc287779bb1f718aa16efda545",
+        "src/html.ts": "1016bc83753bb79042cda8f959688c8b02c298c2",
+        "src/index.ts": "d25c5a1770afb66392f45e0c343904a3cccb5d90"
+      }
+    },
+    {
+      "repository": "primfoundation/browsers-prims-sh",
+      "commit": "4046cff490f13766dda8a33367f0ea1ac04397c5",
+      "target": "cloud/apps/gateway",
+      "domain": "browsers.prims.sh",
+      "purpose": "Authenticated headed-container gateway",
+      "source_blobs": {
+        "src/index.ts": "44b2bedb47be335877db831357be11fbcfe30584",
+        "src/ui.ts": "0b8c35ef6447d67b01e87ca1ee970eef2152756b"
+      }
+    }
+  ],
+  "shared_contract": {
+    "legacy_blob": "3010933e8ad30a35e58660ff0425303ed288807d",
+    "algorithm": "HMAC-SHA256",
+    "cookie_name": "prims_session",
+    "cookie_domain": ".prims.sh",
+    "secret_binding_name": "SESSION_SECRET",
+    "payload_fields": [
+      "sub",
+      "email",
+      "name",
+      "iat",
+      "exp"
+    ]
+  },
+  "login_secret_names": [
+    "APPLE_CLIENT_ID",
+    "APPLE_TEAM_ID",
+    "APPLE_KEY_ID",
+    "APPLE_PRIVATE_KEY",
+    "SESSION_SECRET"
+  ],
+  "locked_behaviors": [
+    "Apple callback remains a POST-compatible OAuth return; state-cookie SameSite behavior must survive migration.",
+    "Existing prims_session cookies remain verifiable during an intentional cutover window unless a separately planned rotation occurs.",
+    "login.prims.sh redirects successful users to browsers.prims.sh.",
+    "browsers.prims.sh rejects missing/invalid sessions and continues to route only configured containers.",
+    "Container machine-host authentication remains an independent Authentik gate; Hub/Foundation publisher identity is not substituted.",
+    "Secret values are never committed or copied into this migration record."
+  ],
+  "archive_gate": [
+    "Both legacy test suites or equivalent imported contract tests pass from the consolidated repository.",
+    "Preview login and gateway use the shared session implementation.",
+    "Real Apple sign-in callback succeeds after migration.",
+    "Existing-session, logout, invalid-session and container-hop acceptance pass.",
+    "Production domains cut over with rollback instructions and prior Worker versions retained.",
+    "Old repositories contain successor notices and are archived only after real-use verification."
+  ],
+  "status": "worker_sources_imported_local_contracts_and_dry_builds_pass_no_route_cutover",
+  "imported_scope": {
+    "application_sources": true,
+    "shared_brand_assets": "brand/ from this repository; not duplicated from legacy applications",
+    "configuration": "isolated preview names, .invalid route placeholders, empty host-only COOKIE_DOMAIN and empty gateway fleet",
+    "excluded": [
+      "source account IDs",
+      "production Worker routes",
+      "production fleet and tenant list",
+      "secret values",
+      "private browser/session contents"
+    ]
+  },
+  "intentional_changes": [
+    "Shared HMAC session implementation validates malformed input and typed/time-bounded claims while retaining valid legacy cookies.",
+    "Gateway requires a configured session secret; the legacy dev bypass and embedded fallback fleet are removed.",
+    "Apple identity tokens are signature/issuer/audience/expiry/nonce verified with RS256 Apple JWKS; nonce is bound to OAuth state.",
+    "Dynamic responses use no-store and no-referrer; callback input is bounded to 32 KiB.",
+    "New login flows require nonce verification. Restart any in-flight login started by the old Worker at cutover; do not bypass nonce checks."
+  ]
+}

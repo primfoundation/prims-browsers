@@ -1,0 +1,16 @@
+{
+  "name": "prims-browsers-gateway-preview",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-06",
+  "workers_dev": true,
+  "assets": {
+    "directory": "../../../brand",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "LOGIN_URL": "https://login.invalid/",
+    "COOKIE_NAME": "prims_session",
+    "COOKIE_DOMAIN": "",
+    "CONTAINERS": "[]"
+  }
+}

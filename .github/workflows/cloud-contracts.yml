@@ -1,0 +1,38 @@
+name: Browser cloud contracts
+
+on:
+  pull_request:
+    paths:
+      - 'cloud/**'
+      - 'brand/**'
+      - '.github/workflows/cloud-contracts.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prims-browsers-cloud-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: cloud
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.18.0'
+      - name: Install exact direct dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck and contract tests
+        run: npm run verify
+      - name: Dry-build both Workers with shared brand assets
+        run: npm run dry-run
+        env:
+          WRANGLER_SEND_METRICS: 'false'

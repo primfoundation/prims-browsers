@@ -1,0 +1,16 @@
+{
+  "name": "prims-browsers-login-preview",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-06",
+  "workers_dev": true,
+  "assets": {
+    "directory": "../../../brand",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "APPLE_REDIRECT_URI": "https://login.invalid/auth/apple/callback",
+    "POST_LOGIN_REDIRECT": "https://gateway.invalid/",
+    "COOKIE_NAME": "prims_session",
+    "COOKIE_DOMAIN": ""
+  }
+}
