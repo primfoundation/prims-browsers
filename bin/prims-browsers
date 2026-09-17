@@ -53,6 +53,7 @@ _LOGIN: dict[str, dict] = {}
 _LOGIN_ASKED: dict[str, dict[str, str]] = {}
 _LOGIN_HOST: dict[str, str] = {}
 _LOGIN_PAYLOAD: dict[str, dict] = {}
+_HANDS_LOCKS: dict[str, threading.RLock] = {}
 STEER_HOLD = 15.0
 INSERT_MAX = 32000
 
@@ -388,22 +389,62 @@ def pending_asks() -> list[dict]:
     return out
 
 
-def wait_until_ungated(tid: str, cdp: str, tab: dict | None, timeout: float = 3600.0) -> bool:
+def hands_lock(tid: str):
+    with _SSE_LOCK:
+        return _HANDS_LOCKS.setdefault(tid, threading.RLock())
+
+
+def human_control(tid: str) -> bool:
+    return bool(tabs_lib.snapshot(tid).get("human"))
+
+
+def take_over(tid: str) -> dict:
+    # Signal first so a worker waiting for the hands lock cannot act again.
+    with _SSE_LOCK:
+        for workers in (_WORK, _LOGIN):
+            prev = workers.pop(tid, None)
+            if prev:
+                prev["stop"].set()
+    # Acknowledge only after any in-flight browser action has finished.
+    with hands_lock(tid):
+        tabs_lib.set_human(tid, True)
+        # Catch a worker started concurrently while we waited for the lock.
+        with _SSE_LOCK:
+            for workers in (_WORK, _LOGIN):
+                prev = workers.pop(tid, None)
+                if prev:
+                    prev["stop"].set()
+            host = _LOGIN_HOST.get(tid)
+        ask_payload_clear(tid)
+        if host:
+            ask_set(tid, host, "denied")
+        set_steer(tid, "takeover", False)
+    actlog.add("control.human", id=tid)
+    return {"ok": True, "action": "takeover", "id": tid, "work": False, "human": True}
+
+
+def wait_until_ungated(tid: str, cdp: str, tab: dict | None, timeout: float = 3600.0,
+                       stop: threading.Event | None = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if wait_gate_clear(tid, 1.2):
-            return True
+        if (stop and stop.is_set()) or human_control(tid):
+            return False
         page = tab
         if page and page.get("id"):
             try:
                 plist = cdp_lib.pages(cdp)
-                page = next((p for p in plist if p.get("id") == page.get("id")), page)
+                page = next((p for p in plist if p.get("id") == tab.get("id")), None)
+                if page is None:
+                    return False
             except Exception:
                 page = tab
         try:
             hit = gate_lib.inspect_page(page) if page else gate_lib.inspect_front(cdp)
         except Exception:
-            hit = {"gated": False}
+            # A transient navigation/CDP failure is not proof of sign-in.
+            hit = {"gated": True, "reason": "login"}
+        if (stop and stop.is_set()) or human_control(tid):
+            return False
         if not hit.get("gated") or not gate_lib.is_hard(hit.get("reason")):
             set_gate(tid, False, None)
             actlog.add("gate.auto_clear", id=tid, reason=hit.get("reason"))
@@ -411,8 +452,16 @@ def wait_until_ungated(tid: str, cdp: str, tab: dict | None, timeout: float = 36
         with _SSE_LOCK:
             filling = tid in _LOGIN
         if filling and hit.get("reason") == "login":
+            if stop:
+                stop.wait(0.2)
+            else:
+                time.sleep(0.2)
             continue
         set_gate(tid, True, hit.get("reason"))
+        if stop:
+            stop.wait(0.2)
+        else:
+            time.sleep(0.2)
     return False
 
 
@@ -535,6 +584,9 @@ def emit_tabs(tid: str, cdp: str) -> None:
     host = host or vault_lib.page_host(href)
     with _SSE_LOCK:
         busy = tid in _LOGIN
+        working = tid in _WORK and not _WORK[tid]["stop"].is_set()
+    if human_control(tid):
+        return
     if vis.get("reason") == "login":
         if busy:
             return
@@ -557,7 +609,7 @@ def emit_tabs(tid: str, cdp: str) -> None:
                 set_gate(tid, True, vis.get("reason"))
             return
         kind, rid = login_lib.next_login(False, None, recs)
-        if kind == "auto" and rid:
+        if kind == "auto" and rid and working:
             ask_set(tid, host, "approved")
             actlog.add("login.auto", id=tid, host=host, record=rid, login=next((r.get("login") for r in recs if r.get("id") == rid), ""))
             start_login(tid, rid)
@@ -589,142 +641,98 @@ def emit_tabs(tid: str, cdp: str) -> None:
         set_gate(tid, bool(hard), vis.get("reason") if hard else None)
 
 
-ACT_JS = """
-(() => {
-  const box = document.querySelector('#prompt-textarea, textarea, input[type=search], input[name=field-keywords], input[name=q]');
-  if (box && box.offsetParent !== null) {
-    box.focus();
-    return {ok:true, kind:'focus'};
-  }
-  const a = [...document.querySelectorAll('a[href]')].find(x => {
-    const r = x.getBoundingClientRect();
-    const t = (x.innerText||'').trim();
-    return r.width>48 && r.height>14 && r.y>90 && t.length>8;
-  });
-  if (!a) return {ok:false};
-  a.click();
-  return {ok:true, kind:'link', t: a.innerText.trim().slice(0,40)};
-})()
-"""
-
-CHATGPT_JS = """
-(async () => {
-  const box = document.querySelector('#prompt-textarea, [data-testid="prompt-textarea"], textarea, [contenteditable="true"]');
-  if (!box) return {ok:false, error:'no composer'};
-  box.focus();
-  const text = 'Reply with one word only: pong';
-  if ('value' in box) {
-    box.value = text;
-    box.dispatchEvent(new Event('input', {bubbles:true}));
-  } else {
-    box.textContent = text;
-    box.dispatchEvent(new InputEvent('input', {bubbles:true, data:text}));
-  }
-  await new Promise(r => setTimeout(r, 400));
-  const send = document.querySelector('#composer-submit-button, button[data-testid="send-button"], button[aria-label*="Send"]');
-  if (send && !send.disabled) send.click();
-  else box.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
-  return {ok:true, kind:'chatgpt', t:text};
-})()
-"""
-
-
 def work_loop(tid: str, url: str, stop: threading.Event) -> None:
+    """Own one target through redirects; never recover by spawning more tabs."""
     try:
         row = find_tenant(load_doc(), tid)
         cdp = cdp_base(row)
-    except (Exception, SystemExit):
-        return
-    tabs_lib.set_work(tid, url)
-    acted = False
-    while not stop.is_set():
-        with _SSE_LOCK:
-            logging_in = tid in _LOGIN
-        if logging_in:
-            stop.wait(1)
-            continue
-        try:
-            tab = cdp_lib.find_tab(cdp, url) or cdp_lib.front_tab(cdp, url)
-        except Exception as e:
-            actlog.add("work.tab_fail", id=tid, error=str(e)[:160])
-            stop.wait(2)
-            continue
-        try:
-            hit = gate_lib.inspect_page(tab)
-        except Exception:
-            hit = {"gated": False}
-        if tab.get("ws"):
-            dismissed = login_lib.dismiss_prompts(tab["ws"])
-            if dismissed.get("ok"):
-                actlog.add("work.dismiss", id=tid, kind=dismissed.get("kind"), t=dismissed.get("t"))
-        if hit.get("reason") == "login":
-            emit_tabs(tid, cdp)
-            wait_until_ungated(tid, cdp, tab, 3600)
+        with hands_lock(tid):
+            if stop.is_set() or human_control(tid):
+                return
+            saved = tabs_lib.set_work(tid, url).get("work_tab")
+            plist = cdp_lib.pages(cdp)
+            tab = next((p for p in plist if p.get("id") == saved), None)
+            tab = tab or next((p for p in plist if cdp_lib.needle_hits(p.get("url"), url)), None)
+            # Creation is attempted once. Even an uncertain CDP result must not
+            # turn a retry into another browser tab.
+            target = tab["id"] if tab else cdp_lib.create_tab(cdp, url).get("targetId")
+            if not target:
+                raise RuntimeError("work target missing")
+            tabs_lib.set_work(tid, url, tab_id=target)
             if stop.is_set():
-                break
-            continue
-        if hit.get("reason") in ("2fa", "sso"):
-            set_gate(tid, True, hit.get("reason"))
-            wait_until_ungated(tid, cdp, tab, 3600)
-            if stop.is_set():
-                break
-            continue
-        if hit.get("gated") and gate_lib.is_hard(hit.get("reason")):
-            set_gate(tid, True, hit.get("reason"))
-            wait_until_ungated(tid, cdp, tab, 3600)
-            if stop.is_set():
-                break
-            set_steer(tid, "surf", True)
-            continue
-        try:
-            cdp_lib.activate(cdp, tab["id"])
-            try:
+                return
+            cdp_lib.activate(cdp, target)
+            if tab and tab.get("ws"):
                 cdp_lib.call(tab["ws"], "Page.bringToFront")
-            except Exception:
-                pass
-            set_steer(tid, "surf", True)
-            if tab.get("ws"):
-                if acted:
-                    actlog.add("work.hold", id=tid, url=url)
+            set_steer(tid, "work", True)
+        deadline = time.monotonic() + 10
+        seen = bool(tab)
+        while not stop.is_set() and not human_control(tid):
+            try:
+                tab = next((p for p in cdp_lib.pages(cdp) if p.get("id") == target), None)
+                if stop.is_set() or human_control(tid):
+                    break
+                if not tab:
+                    if not seen and time.monotonic() < deadline:
+                        stop.wait(0.2)
+                        continue
+                    actlog.add("work.tab_closed", id=tid, tab=target)
+                    with hands_lock(tid):
+                        if not stop.is_set():
+                            tabs_lib.set_work(tid, url, tab_id="")
+                    break
+                seen = True
+                hit = gate_lib.inspect_page(tab)
+                if stop.is_set() or human_control(tid):
+                    break
+                if hit.get("gated") and gate_lib.is_hard(hit.get("reason")):
+                    set_gate(tid, True, hit.get("reason"))
+                    emit_tabs(tid, cdp)
+                    if not wait_until_ungated(tid, cdp, tab, stop=stop):
+                        break
                 else:
-                    chatgpt = "chatgpt.com" in url
-                    r = cdp_lib.call(
-                        tab["ws"],
-                        "Runtime.evaluate",
-                        {
-                            "expression": CHATGPT_JS if chatgpt else ACT_JS,
-                            "returnByValue": True,
-                            "awaitPromise": chatgpt,
-                        },
-                    )
-                    val = (r or {}).get("result", {}).get("value")
-                    actlog.add("work.act", id=tid, url=url, result=val)
-                    acted = True
-        except Exception as e:
-            actlog.add("work.act_fail", id=tid, error=str(e)[:200])
-        emit_tabs(tid, cdp)
-        stop.wait(5)
+                    emit_tabs(tid, cdp)
+                # Work selects and observes a target. Page actions belong to
+                # explicit agent commands, not an internal demo click loop.
+                stop.wait(1)
+            except Exception as e:
+                actlog.add("work.observe_fail", id=tid, error=str(e)[:160])
+                stop.wait(1)
+    except (Exception, SystemExit) as e:
+        actlog.add("work.tab_fail", id=tid, error=str(e)[:160])
+    finally:
+        with _SSE_LOCK:
+            cur = _WORK.get(tid)
+            if cur and cur["stop"] is stop:
+                _WORK.pop(tid, None)
 
 
 def start_work(tid: str, url: str) -> dict:
-    tabs_lib.set_work(tid, url)
-    with _SSE_LOCK:
-        prev = _WORK.get(tid)
-        if prev:
-            prev["stop"].set()
-        stop = threading.Event()
-        _WORK[tid] = {"url": url, "stop": stop}
-    threading.Thread(target=work_loop, args=(tid, url, stop), daemon=True, name=f"work-{tid}").start()
-    set_steer(tid, "surf", True)
+    with hands_lock(tid):
+        tabs_lib.set_human(tid, False)
+        tabs_lib.set_work(tid, url)
+        with _SSE_LOCK:
+            login = _LOGIN.pop(tid, None)
+            if login:
+                login["stop"].set()
+            prev = _WORK.get(tid)
+            if prev and prev["url"] == url and not prev["stop"].is_set():
+                return {"ok": True, "id": tid, "url": url, "work": True}
+            if prev:
+                prev["stop"].set()
+            stop = threading.Event()
+            _WORK[tid] = {"url": url, "stop": stop}
+        threading.Thread(target=work_loop, args=(tid, url, stop), daemon=True, name=f"work-{tid}").start()
     return {"ok": True, "id": tid, "url": url, "work": True}
 
 
 def stop_work(tid: str) -> None:
     with _SSE_LOCK:
-        prev = _WORK.get(tid)
+        prev = _WORK.pop(tid, None)
         if prev:
             prev["stop"].set()
-            _WORK.pop(tid, None)
+    with hands_lock(tid):
+        set_steer(tid, "work", False)
 
 
 def login_agent(tid: str, rid: str, stop: threading.Event) -> None:
@@ -745,36 +753,54 @@ def login_agent(tid: str, rid: str, stop: threading.Event) -> None:
     did_user = did_pass = False
     last_user = last_pass = 0.0
     waiting_2fa = False
+    target = None
+    fronted = False
     try:
         while not stop.is_set():
             try:
                 vis = gate_lib.inspect_front(cdp)
                 if vis.get("reason") in ("captcha", "human", "cloudflare"):
                     set_gate(tid, True, vis.get("reason"))
-                    wait_until_ungated(tid, cdp, None, 3600)
+                    if not wait_until_ungated(tid, cdp, None, stop=stop):
+                        break
                     continue
-                tab, _form = login_lib.find_login_page(cdp, prefer_host=cred.get("host"))
-                if not tab:
-                    plist = cdp_lib.pages(cdp)
-                    tab = next((p for p in plist if p.get("id") == vis.get("tab")), None) or (plist[0] if plist else None)
+                plist = cdp_lib.pages(cdp)
+                if target:
+                    if vis.get("tab") and vis["tab"] != target:
+                        break
+                    tab = next((p for p in plist if p.get("id") == target), None)
+                    if tab is None:
+                        break
+                else:
+                    tab = next((p for p in plist if p.get("id") == vis.get("tab")), None)
+                    if not tab:
+                        tab, _form = login_lib.find_login_page(cdp, prefer_host=cred.get("host"))
+                    target = tab.get("id") if tab else None
                 ws = tab.get("ws") if tab else None
                 if not ws:
                     stop.wait(1)
                     continue
-                login_lib.bring_login_front(cdp, tab)
-                dismissed = login_lib.dismiss_prompts(ws)
-                if dismissed.get("ok"):
-                    actlog.add("login.dismiss", id=tid, kind=dismissed.get("kind"), t=dismissed.get("t"))
-                now = time.time()
-                form = login_lib.inspect_form(ws)
-                step = form.get("step")
-                if step == "username" and did_user:
-                    stop.wait(0.6)
-                    continue
-                if step == "password" and did_pass:
-                    stop.wait(0.6)
-                    continue
-                r = login_lib.act(ws, user, password)
+                with hands_lock(tid):
+                    if stop.is_set() or human_control(tid):
+                        break
+                    if not fronted:
+                        login_lib.bring_login_front(cdp, tab)
+                        fronted = True
+                    dismissed = login_lib.dismiss_prompts(ws)
+                    if dismissed.get("ok"):
+                        actlog.add("login.dismiss", id=tid, kind=dismissed.get("kind"), t=dismissed.get("t"))
+                    now = time.time()
+                    form = login_lib.inspect_form(ws)
+                    step = form.get("step")
+                    if step == "username" and did_user:
+                        stop.wait(0.6)
+                        continue
+                    if step == "password" and did_pass:
+                        stop.wait(0.6)
+                        continue
+                    r = login_lib.act(ws, user, password)
+                if stop.is_set() or human_control(tid):
+                    break
                 step = r.get("step")
                 action = r.get("action")
                 actlog.add(
@@ -790,14 +816,16 @@ def login_agent(tid: str, rid: str, stop: threading.Event) -> None:
                 if action == "wait-sso":
                     set_gate(tid, True, "sso")
                     actlog.add("login.sso_wait", id=tid, login=user)
-                    wait_until_ungated(tid, cdp, tab, 3600)
+                    if not wait_until_ungated(tid, cdp, tab, stop=stop):
+                        break
                     continue
                 if action == "wait-2fa":
                     set_gate(tid, True, "2fa")
                     if not waiting_2fa:
                         waiting_2fa = True
                         actlog.add("login.2fa_wait", id=tid, login=user)
-                    wait_until_ungated(tid, cdp, tab, 3600)
+                    if not wait_until_ungated(tid, cdp, tab, stop=stop):
+                        break
                     actlog.add("login.2fa_cleared", id=tid)
                     form = login_lib.inspect_form(ws)
                     if form.get("step") != "2fa":
@@ -847,7 +875,16 @@ def login_agent(tid: str, rid: str, stop: threading.Event) -> None:
                 _LOGIN.pop(tid, None)
 
 
-def start_login(tid: str, rid: str) -> dict:
+def start_login(tid: str, rid: str, *, explicit: bool = False) -> dict:
+    with hands_lock(tid):
+        if human_control(tid) and not explicit:
+            return {"ok": False, "id": tid, "human": True}
+        if explicit:
+            tabs_lib.set_human(tid, False)
+        return _start_login(tid, rid)
+
+
+def _start_login(tid: str, rid: str) -> dict:
     stop_work(tid)
     vault_lib.touch(tid, rid)
     recs = vault_lib.list_records(tid)
@@ -872,43 +909,12 @@ def start_login(tid: str, rid: str) -> dict:
 
 
 def continue_human(tid: str) -> dict:
-    before = gate_view(tid)
-    work = tabs_lib.snapshot(tid)
-    with _SSE_LOCK:
-        live = dict(_WORK.get(tid) or {})
-    url = live.get("url") or work.get("work")
-    actlog.add(
-        "continue.click",
-        id=tid,
-        gate_before=before,
-        work_url=url,
-        front=(work.get("front")),
-        tabs=[t.get("host") for t in (work.get("tabs") or [])],
-        worker=bool(live),
-    )
-    snap = set_gate(tid, False, None)
+    # Continue is an acknowledgement, never a navigation or sign-in proof.
+    # The owning worker rechecks its actual page; takeover stays in effect.
+    snap = gate_view(tid)
     sse_broadcast("continue", {"id": tid})
-    err = None
-    with _SSE_LOCK:
-        logging_in = tid in _LOGIN
-    if logging_in:
-        actlog.add("continue.login_wait", id=tid)
-        return {"ok": True, "id": tid, "gate": snap, "url": url, "error": None, "login": True}
-    if url:
-        try:
-            row = find_tenant(load_doc(), tid)
-            tab = cdp_lib.front_tab(cdp_base(row), url)
-            actlog.add("continue.front", id=tid, url=tab.get("url"), title=tab.get("title"))
-        except (Exception, SystemExit) as e:
-            err = str(e)[:200]
-            actlog.add("continue.front_fail", id=tid, error=err)
-        set_steer(tid, "surf", True)
-    else:
-        actlog.add("continue.no_work", id=tid)
-        err = "no work url"
-    out = {"ok": err is None, "id": tid, "gate": snap, "url": url, "error": err}
-    actlog.add("continue.done", **{k: v for k, v in out.items() if k != "gate"}, gated=snap.get("gated"))
-    return out
+    actlog.add("continue.click", id=tid, human=human_control(tid))
+    return {"ok": True, "id": tid, "gate": snap, "human": human_control(tid)}
 
 
 def watch_jar(tid: str, cdp: str) -> None:
@@ -941,7 +947,7 @@ def start_watchers() -> None:
             daemon=True,
             name=f"watch-{row['id']}",
         ).start()
-        if os.environ.get("PRIMS_BROWSERS_AUTOWORK"):
+        if os.environ.get("PRIMS_BROWSERS_AUTOWORK") and not human_control(row["id"]):
             url = work_url(row)
             if url:
                 start_work(row["id"], url)
@@ -950,12 +956,16 @@ def start_watchers() -> None:
 def set_steer(tid: str | None, verb: str | None, on: bool) -> dict:
     if not tid:
         return {"id": None, "on": False, "hold": STEER_HOLD}
+    if on and human_control(tid):
+        return steer_view(tid)
     host = ""
     try:
         host = front_host(cdp_base(find_tenant(load_doc(), tid)))
     except (Exception, SystemExit):
         host = ""
     with _SSE_LOCK:
+        if on and human_control(tid):
+            on, verb = False, "takeover"
         if on:
             _STEERS[tid] = {"id": tid, "verb": verb, "on": True, "last_touch": time.time(), "host": host}
         else:
@@ -1080,8 +1090,7 @@ def chrome_snapshot(row: dict) -> dict:
 
 def chrome_action(row: dict, action: str, url: str | None = None, tab: str | None = None, text: str | None = None) -> dict:
     if action == "takeover":
-        set_steer(row["id"], "takeover", False)
-        return {"ok": True, "action": "takeover", "id": row["id"]}
+        return take_over(row["id"])
     if action == "insert":
         raw = text if isinstance(text, str) else ""
         if not raw:
@@ -1381,7 +1390,7 @@ class DeskHandler(SimpleHTTPRequestHandler):
             rid = data.get("record")
             if not tid or not rid:
                 return self._send_json({"error": "id and record required"}, 400)
-            return self._send_json(start_login(tid, rid))
+            return self._send_json(start_login(tid, rid, explicit=True))
         if path in ("/api/login-deny", "/api/login-deny/"):
             tid = data.get("id")
             with _SSE_LOCK:
@@ -1397,6 +1406,11 @@ class DeskHandler(SimpleHTTPRequestHandler):
             return self._send_json({"ok": True, "id": tid})
         if path in ("/api/work", "/api/work/"):
             tid = data.get("id")
+            if not tid:
+                return self._send_json({"error": "id required"}, 400)
+            if data.get("on") is False:
+                stop_work(tid)
+                return self._send_json({"ok": True, "id": tid, "work": False})
             url = data.get("url")
             if not url and tid:
                 try:
@@ -1405,9 +1419,6 @@ class DeskHandler(SimpleHTTPRequestHandler):
                     url = None
             if not tid or not url:
                 return self._send_json({"error": "id and url required (set tenants[].work or pass url)"}, 400)
-            if data.get("on") is False:
-                stop_work(tid)
-                return self._send_json({"ok": True, "id": tid, "work": False})
             return self._send_json(start_work(tid, url))
         if path in ("/api/chrome", "/api/chrome/"):
             tid = data.get("id")

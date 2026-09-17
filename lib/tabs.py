@@ -71,7 +71,7 @@ def snapshot(tid: str) -> dict:
     return row
 
 
-def set_work(tid: str, url: str | None) -> dict:
+def set_work(tid: str, url: str | None, tab_id: str | None = None) -> dict:
     with _LOCK:
         p = _ledger()
         if p.is_file():
@@ -84,13 +84,26 @@ def set_work(tid: str, url: str | None) -> dict:
         else:
             data = {}
         row = data.get(tid) or {"id": tid, "work": None, "front": None, "tabs": []}
+        if row.get("work") != url:
+            row.pop("work_tab", None)
         row["work"] = url
+        if tab_id is not None:
+            row["work_tab"] = tab_id or None
         data[tid] = row
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(data, indent=2))
         tmp.replace(p)
         return row
+
+
+def set_human(tid: str, human: bool) -> None:
+    """Keep an explicit takeover across desk restarts."""
+    with _LOCK:
+        data = load()
+        row = data.setdefault(tid, {"id": tid, "work": None, "front": None, "tabs": []})
+        row["human"] = human
+        save(data)
 
 
 def record(tid: str, pages: list[dict], front_id: str | None, gated_ids: set[str] | None = None) -> dict:

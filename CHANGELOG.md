@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## Unreleased
 
+### Fixes
+- Keep the assigned browser target across SSO redirects; stop when it closes instead of opening replacement login tabs.
+- Make Take over cancel work and login workers, wait for in-flight actions, and persist human control across desk restarts. Work or an explicit login approval hands control back.
+- Continue acknowledges the gate without opening or focusing a work tab. Login waits are cancellable and verify the page before resuming.
+- Remove internal demo clicks/messages from Work and make passive gate inspection read-only.
+- Ask before filling saved credentials on an idle desk; a login worker stops if the user switches away from its assigned tab.
+
 ### Product
 - Position as FOSS toolkit: sandbox jars agents drive without the host mouse.
 - Paseo plugin → usually one tenant; local desk → multi-tenant.
