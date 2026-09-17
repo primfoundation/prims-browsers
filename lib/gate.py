@@ -148,12 +148,12 @@ def click_consent(ws_url: str) -> dict:
         return {"ok": False, "error": str(e)[:120]}
 
 
-def inspect_page(p: dict) -> dict:
+def inspect_page(p: dict, *, dismiss_consent: bool = False) -> dict:
     if not p.get("ws"):
         return {"gated": False, "reason": None, "tab": p.get("id")}
     hit = inspect(p["ws"])
     hit["tab"] = p.get("id")
-    if hit.get("reason") == "consent":
+    if dismiss_consent and hit.get("reason") == "consent":
         click_consent(p["ws"])
         hit = inspect(p["ws"])
         hit["tab"] = p.get("id")

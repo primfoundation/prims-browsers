@@ -74,6 +74,10 @@ prims-browsers record alpha stop
 
 `work` is what **Work** / `POST /api/work` opens when no URL is passed (falls back to `home`). Add more `tenants` rows for local multi-tenant.
 
+Work selects one browser tab and keeps its identity through sign-in redirects. It does not click links or send messages on its own, and closing the tab stops that worker. Repeated Work clicks reuse the running worker.
+
+**Take over** cancels work and login automation and keeps human control across desk restarts. Click **Work** or explicitly approve a saved login to hand control back. **Continue** only acknowledges a gate; it does not switch tabs, resume a cancelled worker, or treat an unfinished sign-in as complete. Passive tab/gate inspection never clicks page controls.
+
 Sample compose: `jars/compose.yaml` (`alpha` / `beta` → example.com). Keep private fleets in gitignored `jars/compose.local.yaml`.
 
 ## Vault
@@ -87,7 +91,7 @@ prims-browsers vaults connect paseo-vault ~/.paseo/paseo-vault --id paseo
 prims-browsers vaults write system
 ```
 
-Desk login ask / approve / fill uses the merged view. Tests isolate vaults under temp dirs.
+Desk login ask / approve / fill uses the merged view. An idle desk asks before filling saved credentials; automatic saved-login handling is limited to an active Work session. Tests isolate vaults under temp dirs.
 
 ```bash
 prims-browsers test

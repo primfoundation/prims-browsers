@@ -390,7 +390,6 @@ if (continueBtn) {
 
 takeoverBtn.addEventListener("click", async () => {
   logAction("takeover");
-  fetch("/api/login-deny", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: selected }) });
   delete autos[selected];
   await chromeAction("takeover");
   try {
