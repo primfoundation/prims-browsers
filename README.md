@@ -115,3 +115,7 @@ Regenerate README shots: `python3 scripts/capture-screenshots.py`.
 ## License
 
 [MIT](LICENSE) © Prim Foundation
+
+## Cloud login (plan)
+
+Human login for `browsers.prims.sh` will be served by [`prims-sso`](https://github.com/primfoundation/prims-sso) (one identity, one door). `cloud/apps/login` is **deprecated** — see [cloud/README.md](./cloud/README.md), [prims-cleanup#10](https://github.com/primfoundation/prims-cleanup/issues/10), [prims-sso#5](https://github.com/primfoundation/prims-sso/issues/5). No code move yet.
