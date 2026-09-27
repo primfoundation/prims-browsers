@@ -22,3 +22,12 @@ Checked-in Worker names end in `-preview`. Route URLs use `.invalid`, `COOKIE_DO
 For production compatibility, preserve `login.prims.sh`, `browsers.prims.sh`, `prims_session`, `.prims.sh` scope, the deliberate shared-secret migration window, Apple's cross-site POST state cookie and the independent Authentik gate at container hosts. At cutover, restart login attempts begun by the old Worker because they lack the new nonce; already-valid session cookies remain verifiable.
 
 Before moving routes, record preview deployments and source revisions; verify real Apple callback, existing sessions, logout, invalid sessions and a real container hop. Retain the prior Worker versions, routes and configuration for rollback. Restore both surfaces together if shared-contract acceptance fails, then repeat health/session checks. Record an actual recovery drill and observation window before archiving either source repository. No account, Apple service configuration, live Worker, DNS route or legacy history was changed by this import.
+
+## Login app status (plan)
+
+> **DEPRECATED — plan note, no code move yet.**
+>
+> `cloud/apps/login` is **deprecated** in favor of [`primfoundation/prims-sso`](https://github.com/primfoundation/prims-sso).
+> **Decision:** one identity, one door — browsers delegates to prims-sso; Apple OAuth moves into the foundation IdP.
+> See [prims-cleanup#10](https://github.com/primfoundation/prims-cleanup/issues/10) and [prims-sso#5](https://github.com/primfoundation/prims-sso/issues/5).
+> Gateway (`cloud/apps/gateway`) remains; it will trust sessions issued by prims-sso after cutover.
